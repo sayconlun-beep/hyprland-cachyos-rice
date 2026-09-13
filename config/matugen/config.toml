@@ -1,0 +1,72 @@
+# matugen: wallpaper -> Material You palette -> every themed app.
+#
+# Don't run this by hand. `rice-wallpaper set|theme` calls it with
+# `-t scheme-tonal-spot --prefer saturation` - the combination that reproduces
+# the palettes Noctalia derived, so wallpapers curated for their colours keep
+# them - and then runs rice-theme-reload ONCE. That is why no template below
+# carries a post_hook: fifteen hooks would reload waybar fifteen times.
+[config]
+
+[templates.hyprland]
+input_path = "~/.config/matugen/templates/hyprland-colors.conf"
+output_path = "~/.config/hypr/colors.conf"
+
+# Hyprland only reads colors.conf on (re)load, and a reload resets live state
+# like focus mode, so the same colours are also pushed as `hyprctl keyword`s.
+[templates.hyprland-live]
+input_path = "~/.config/matugen/templates/hyprland-live.batch"
+output_path = "~/.cache/rice/hypr-colors.batch"
+
+[templates.waybar]
+input_path = "~/.config/matugen/templates/palette.css"
+output_path = "~/.config/waybar/colors.css"
+
+
+
+[templates.rofi]
+input_path = "~/.config/matugen/templates/rofi.rasi"
+output_path = "~/.config/rofi/colors.rasi"
+
+[templates.kitty]
+input_path = "~/.config/matugen/templates/kitty.conf"
+output_path = "~/.config/kitty/colors.conf"
+
+[templates.foot]
+input_path = "~/.config/matugen/templates/foot.ini"
+output_path = "~/.config/foot/colors.ini"
+
+[templates.gtk3]
+input_path = "~/.config/matugen/templates/gtk.css"
+output_path = "~/.config/gtk-3.0/colors.css"
+
+[templates.gtk4]
+input_path = "~/.config/matugen/templates/gtk.css"
+output_path = "~/.config/gtk-4.0/colors.css"
+
+# Qt apps (Dolphin) go through qt6ct - QT_QPA_PLATFORMTHEME=kde is a trap here,
+# its plugin ships with plasma-integration, which is not installed.
+[templates.qt6ct]
+input_path = "~/.config/matugen/templates/qt6ct.conf"
+output_path = "~/.config/qt6ct/colors/matugen.conf"
+
+[templates.kde]
+input_path = "~/.config/matugen/templates/kde.colors"
+output_path = "~/.local/share/color-schemes/Matugen.colors"
+
+[templates.btop]
+input_path = "~/.config/matugen/templates/btop.theme"
+output_path = "~/.config/btop/themes/matugen.theme"
+
+[templates.cava]
+input_path = "~/.config/matugen/templates/cava.conf"
+output_path = "~/.config/cava/config"
+
+
+[templates.fastfetch]
+input_path = "~/.config/matugen/templates/fastfetch.jsonc"
+output_path = "~/.config/fastfetch/config.jsonc"
+
+# The Quickshell overlays (carousel, keybind menu) watch this file themselves.
+[templates.quickshell]
+input_path = "~/.config/matugen/templates/quickshell.json"
+output_path = "~/.cache/rice/quickshell-colors.json"

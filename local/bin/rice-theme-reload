@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# Push a freshly generated palette into everything already running.
+# matugen only writes files; each app needs its own nudge to re-read them.
+CACHE="$HOME/.cache/rice"     # literal ~/.cache, matching matugen's config.toml
+
+# Hyprland: colors.conf is only read on reload, and a reload would also reset
+# live state (focus mode, runtime keywords), so apply the colours as keywords.
+if [[ -s "$CACHE/hypr-colors.batch" ]]; then
+    hyprctl --batch "$(< "$CACHE/hypr-colors.batch")" >/dev/null 2>&1
+fi
+
+# waybar: nothing to do. reload_style_on_change picks up the new colors.css by
+# itself; a SIGUSR2 on top restarted every module and made the bar flicker.
+pkill -USR1 -x kitty                    # re-read kitty.conf, colours included
+pkill -USR2 -x cava                     # colours only
+
+"$HOME/.local/bin/rice-kde-colors" >/dev/null 2>&1
+
+# GTK: follow `rice-wallpaper mode`. The theme name is set via Adwaita and
+# back, because GTK3 apps re-read their CSS only when the NAME changes.
+# adw-gtk3 (light) is only used if it is installed.
+if command -v gsettings >/dev/null; then
+    mode="$(cat "$CACHE/mode" 2>/dev/null)"
+    if [[ "$mode" == light && -d /usr/share/themes/adw-gtk3 ]]; then
+        theme=adw-gtk3; scheme=prefer-light
+    else
+        theme=adw-gtk3-dark; scheme=prefer-dark
+    fi
+    gsettings set org.gnome.desktop.interface color-scheme "$scheme"
+    gsettings set org.gnome.desktop.interface gtk-theme "'Adwaita'"
+    gsettings set org.gnome.desktop.interface gtk-theme "$theme"
+fi
+exit 0
