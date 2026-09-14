@@ -120,7 +120,7 @@ if [[ "$mode" == uninstall ]]; then
     if (( apply == 0 )); then
         echo "Dry run. Re-run with --uninstall --apply."
     else
-        echo "Done. Generated colour files (hypr/colors.conf, waybar/colors.css, ...) and"
+        echo "Done. Generated colour files (hypr/colors.lua, waybar/colors.css, ...) and"
         echo "~/.cache/rice were left in place. Log out of Hyprland before logging back in"
         echo "with your old config."
     fi
@@ -147,7 +147,7 @@ if command -v pacman >/dev/null; then
         echo "  all there"
     fi
     if [[ ! -d /usr/share/icons/Bibata-Modern-Ice && ! -d "$HOME/.local/share/icons/Bibata-Modern-Ice" ]]; then
-        echo "  missing:  bibata-cursor-theme-bin from the AUR (or change XCURSOR_THEME in hypr/conf/env.conf)"
+        echo "  missing:  bibata-cursor-theme-bin from the AUR (or change XCURSOR_THEME in hypr/conf/env.lua)"
     fi
 else
     echo "  no pacman here - check PACKAGES.md for what to install"
@@ -211,7 +211,7 @@ fi
 
 echo
 if command -v Hyprland >/dev/null; then
-    if out="$(Hyprland --verify-config --config "$HOME/.config/hypr/hyprland.conf" 2>&1)"; then
+    if out="$(Hyprland --verify-config --config "$HOME/.config/hypr/hyprland.lua" 2>&1)"; then
         echo "Hyprland config: OK"
     else
         printf '%s\n' "$out" | tail -n 20
@@ -225,6 +225,6 @@ Done. Log in to Hyprland (or `hyprctl reload` if you are in it), then:
   - Super+/            every keybind, and rebinding
   - Super+Shift+W      wallpapers (add images to ~/Pictures/Wallpapers first)
   - Super+Shift+D      monitors: mode, scale, position, VRR
-  - keyboard layout    ~/.config/hypr/conf/input.conf
-  - your apps          $term / $files / $browser at the top of hypr/conf/binds.conf
+  - keyboard layout    ~/.config/hypr/conf/input.lua
+  - your apps          term / files / browser at the top of hypr/conf/binds.lua
 EOF

@@ -8,14 +8,20 @@
 [config]
 
 [templates.hyprland]
-input_path = "~/.config/matugen/templates/hyprland-colors.conf"
-output_path = "~/.config/hypr/colors.conf"
+input_path = "~/.config/matugen/templates/hyprland-colors.lua"
+output_path = "~/.config/hypr/colors.lua"
 
-# Hyprland only reads colors.conf on (re)load, and a reload resets live state
-# like focus mode, so the same colours are also pushed as `hyprctl keyword`s.
+# hyprlock is not part of Hyprland's move to Lua: its config is still hyprlang,
+# so it keeps a $variable copy of the same palette.
+[templates.hyprlock]
+input_path = "~/.config/matugen/templates/hyprlock-colors.conf"
+output_path = "~/.config/hypr/hyprlock-colors.conf"
+
+# Hyprland only reads colors.lua on (re)load, and a reload resets live state
+# like focus mode, so the same colours are also pushed with `hyprctl eval`.
 [templates.hyprland-live]
-input_path = "~/.config/matugen/templates/hyprland-live.batch"
-output_path = "~/.cache/rice/hypr-colors.batch"
+input_path = "~/.config/matugen/templates/hyprland-live.lua"
+output_path = "~/.cache/rice/hypr-colors.lua"
 
 [templates.waybar]
 input_path = "~/.config/matugen/templates/palette.css"

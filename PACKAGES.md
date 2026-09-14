@@ -17,7 +17,7 @@ sudo pacman -S --needed \
 ```
 
 Plus `bibata-cursor-theme-bin` from the AUR, or change `XCURSOR_THEME` in
-`config/hypr/conf/env.conf` to a cursor theme you have.
+`config/hypr/conf/env.lua` to a cursor theme you have.
 
 ## What needs what
 

@@ -22,7 +22,7 @@ look() {
                   (.value|tostring) + (if .source == "override" then "  ●" else "" end)] | @tsv' <<< "$json" \
                   | column -t -s $'\t')
         rows+=("󰑓  Reset everything to the baseline")
-        idx="$(printf '%s\n' "${rows[@]}" | menu "󰉼  look" -format i -mesg "● = changed from hyprland.conf")" || return 0
+        idx="$(printf '%s\n' "${rows[@]}" | menu "󰉼  look" -format i -mesg "● = changed from hyprland.lua")" || return 0
         [[ -z "$idx" ]] && return 0
 
         if (( idx == ${#rows[@]} - 1 )); then
@@ -55,7 +55,7 @@ displays() {
     [[ -z "$idx" ]] && return 0
     conn="${conns[$idx]}"
 
-    field="$(printf '%s\n' "Mode" "Scale" "VRR" "Turn on / off" "Reset to hyprland.conf" | menu "$conn")" || return 0
+    field="$(printf '%s\n' "Mode" "Scale" "VRR" "Turn on / off" "Reset to hyprland.lua" | menu "$conn")" || return 0
     case "$field" in
         Mode)
             mapfile -t modes < <(jq -r --arg c "$conn" '.outputs[] | select(.connector == $c)

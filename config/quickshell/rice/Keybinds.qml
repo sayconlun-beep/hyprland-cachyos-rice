@@ -1,7 +1,7 @@
-// Keybind cheatsheet + editor (Super+/). Every bind in binds.conf, grouped by
+// Keybind cheatsheet + editor (Super+/). Every bind in binds.lua, grouped by
 // its section and searchable; Enter (or a second click) on one captures a new
 // combo and hands it to rice-binds-ctl.py, which applies it live and saves it
-// to conf.d/30-binds.conf. A clash is shown first and can be swapped.
+// to conf.d/30-binds.lua. A clash is shown first and can be swapped.
 //
 // While capturing, Hyprland sits in the `rice-capture` submap, which binds
 // nothing but Escape - otherwise Super+Q would close a window instead of
@@ -47,7 +47,7 @@ Scope {
 
     function close() {
         if (mode === "capture")
-            Hyprland.dispatch("submap reset")
+            Hyprland.dispatch('hl.dsp.submap("reset")')
         mode = "browse"
         open = false
     }
@@ -158,7 +158,7 @@ Scope {
         if (!b)
             return
         if (!b.editable) {
-            message = "Mouse and scroll binds can only be changed in binds.conf"
+            message = "Mouse and scroll binds can only be changed in binds.lua"
             return
         }
         target = b
@@ -166,7 +166,7 @@ Scope {
         pending = null
         message = ""
         mode = "capture"
-        Hyprland.dispatch("submap rice-capture")
+        Hyprland.dispatch('hl.dsp.submap("rice-capture")')
     }
 
     function captureKey(e) {
@@ -181,7 +181,7 @@ Scope {
         pending = { mods: mods.join(" "), key: key }
         pendingKeys = pretty(mods).concat([key.length === 1 ? key : key.replace(/^XF86/, "")])
         mode = "saving"
-        Hyprland.dispatch("submap reset")
+        Hyprland.dispatch('hl.dsp.submap("reset")')
         runCtl(["set", target.id, pending.mods, pending.key])
     }
 
@@ -189,7 +189,7 @@ Scope {
         if (!b)
             return
         if (!b.overridden) {
-            message = `${b.label} is already as binds.conf has it`
+            message = `${b.label} is already as binds.lua has it`
             return
         }
         target = b

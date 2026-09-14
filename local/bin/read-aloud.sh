@@ -2,7 +2,7 @@
 # Read prose aloud with piper, for listening back while editing.
 #
 #   read-aloud.sh <file.md>     read a manuscript file
-#   read-aloud.sh --selection   read the clipboard
+#   read-aloud.sh --selection   read the highlighted text (else the clipboard)
 #   read-aloud.sh --toggle      pause / resume
 #   read-aloud.sh --back        back 10s        --forward  skip 10s
 #   read-aloud.sh --prev        previous sentence  --next  next sentence
@@ -151,7 +151,10 @@ if [[ "${1:-}" == "--no-tile" ]]; then WANT_TILE=0; shift; fi
 [[ -f "$VOICE" ]] || { echo "voice model not found: $VOICE" >&2; exit 1; }
 
 if [[ "${1:-}" == "--selection" ]]; then
-    text=$(wl-paste --no-newline 2>/dev/null)
+    # Highlighted text lives in the primary selection, not the clipboard -
+    # reading only the clipboard ignores a highlight that was never Ctrl+C'd.
+    text=$(wl-paste --primary --no-newline 2>/dev/null)
+    [[ -n "${text// }" ]] || text=$(wl-paste --no-newline 2>/dev/null)
 elif [[ -n "${1:-}" && -f "$1" ]]; then
     text=$(cat "$1")
 else

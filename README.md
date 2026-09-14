@@ -3,7 +3,7 @@
 A Hyprland desktop themed end to end from the wallpaper. Pick an image and
 [matugen](https://github.com/InioX/matugen) derives a Material You palette
 that the bar, the shell, terminals, GTK and Qt apps, window borders, the lock
-screen and the visualiser all follow live.
+screen and the visualiser all follow - live, no restart.
 
 It is built from small single-purpose pieces: Waybar for the bar, rofi for
 quick menus, and a [Quickshell](https://quickshell.org) layer for everything
@@ -50,7 +50,7 @@ else.
 
 - An Arch-based distro for the package names (it was built on CachyOS). Other
   distros work if you find the equivalents.
-- Hyprland 0.53 or newer, Quickshell 0.3, Waybar 0.15, matugen 4, rofi 2.
+- Hyprland 0.55 or newer (the config is Lua), Quickshell 0.3, Waybar 0.15, matugen 4, rofi 2.
 - Fonts: JetBrainsMono Nerd Font and Inter.
 
 The full list is in [PACKAGES.md](PACKAGES.md).
@@ -77,6 +77,13 @@ To undo it: `./install.sh --uninstall` (dry run), then
 `./install.sh --uninstall --apply`, which removes the links and restores
 whatever was moved aside.
 
+**Upgrading from the hyprlang version** (before September 2026, when the
+Hyprland config was `hyprland.conf`): `git pull`, then `./install.sh --apply`
+links the new `.lua` files. Hyprland reads `hyprland.lua` in preference to the
+old file, so the leftover `.conf` links do nothing - delete them at leisure.
+Changes made in the settings or keybind menus lived in `conf.d/*.conf`, which
+is no longer read: make them again, and they are saved as `conf.d/*.lua`.
+
 > **Using mako, dunst or swaync?** Stop it and remove it from your autostart.
 > Quickshell needs the notification name for itself. swaync can also be
 > started by D-Bus on its own, so `systemctl --user mask swaync.service` too.
@@ -87,11 +94,11 @@ whatever was moved aside.
    or search wallhaven with `Super+Ctrl+W`, then choose one with
    `Super+Shift+W`.
 2. **Monitors.** Every output starts at its preferred mode. Use
-   `Super+Shift+D`, or add `monitor = ` lines in `config/hypr/hyprland.conf`;
+   `Super+Shift+D`, or add `hl.monitor({ ... })` lines in `config/hypr/hyprland.lua`;
    there are examples there.
-3. **Keyboard layout.** `kb_layout` in `config/hypr/conf/input.conf` (set to `us`).
-4. **Your apps.** `$term`, `$files` and `$browser` at the top of
-   `config/hypr/conf/binds.conf`. `Super+Enter` opens Steam.
+3. **Keyboard layout.** `kb_layout` in `config/hypr/conf/input.lua` (set to `us`).
+4. **Your apps.** `term`, `files` and `browser` at the top of
+   `config/hypr/conf/binds.lua`. `Super+Enter` opens Steam.
 5. **Weather location.** It is looked up from your IP. To set it yourself,
    write `~/.config/rice/location.json`:
    `{"name": "Somewhere", "lat": 51.5, "lon": -0.12}`.
@@ -128,7 +135,7 @@ whatever was moved aside.
 | `Ctrl+Alt+Del` | btop |
 
 Changes made in the keybind menu are saved to
-`~/.config/hypr/conf.d/30-binds.conf`; `binds.conf` itself is never
+`~/.config/hypr/conf.d/30-binds.lua`; `binds.lua` itself is never
 rewritten. Delete that file to reset every bind.
 
 ## How the theming works
@@ -148,8 +155,8 @@ rice-wallpaper set <image>
   colour to use when an image has several, and with no terminal it fails.
 - No template has a `post_hook`: `rice-theme-reload` runs once afterwards
   instead of fifteen reloads. Run it yourself if you call matugen by hand.
-- Hyprland's colours are pushed live with `hyprctl` from
-  `~/.cache/rice/hypr-colors.batch`. A reload would also reset state such as
+- Hyprland's colours are pushed live with `hyprctl eval` from
+  `~/.cache/rice/hypr-colors.lua`. A reload would also reset state such as
   focus mode.
 - The cache is literally `~/.cache/rice`, not `$XDG_CACHE_HOME`, because
   matugen's config writes there by `~`.
@@ -157,7 +164,7 @@ rice-wallpaper set <image>
 ## Where things live
 
 ```
-config/hypr/hyprland.conf     monitors and look (the settings engines read these)
+config/hypr/hyprland.lua      monitors and look (the settings engines read these)
 config/hypr/conf/             env, input, workspaces, window rules, binds, autostart
 config/hypr/conf.d/           generated overrides from the settings and keybind menus
 config/quickshell/rice/       the shell: shell.qml wires every component together
@@ -201,13 +208,17 @@ qs -c rice ipc call <target> <function>
 
 ## Troubleshooting
 
-- **Hyprland complains that `colors.conf` does not exist:** run
+- **Window borders stay cyan and purple whatever the wallpaper:** there is no
+  `~/.config/hypr/colors.lua` yet, so Hyprland uses its built-in fallback. Run
   `rice-wallpaper theme`, or `./install.sh --apply` again.
 - **Shell not showing up:** `qs -c rice log` shows the errors. Restart it with
   `pkill -x qs; qs -c rice -n -d`. Quickshell does not always pick up QML
   edits by itself.
 - **Locked out after a lock-screen crash:** from a TTY,
-  `hyprctl --instance 0 dispatch exec hyprlock`.
+  `hyprctl --instance 0 dispatch 'hl.dsp.exec_cmd("hyprlock")'`.
+- **`hyprctl keyword` is refused, or `hyprctl dispatch workspace 2` is a syntax
+  error:** this rice uses Hyprland's Lua config (0.55 or newer). Use
+  `hyprctl eval '<lua>'` and `hyprctl dispatch 'hl.dsp.focus({ workspace = 2 })'`.
 - **No notifications:** another daemon has the D-Bus name (see Install).
 - **Visualiser flat:** cava follows the *default* output. Check it with
   `wpctl status`.

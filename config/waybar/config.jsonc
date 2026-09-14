@@ -34,7 +34,8 @@
   "custom/launcher": {
     "format": "󰣇",
     "tooltip": false,
-    "on-click": "rofi -show drun"
+    "on-click": "rofi -show drun -theme ~/.config/rofi/launcher.rasi",
+    "on-click-right": "rofi -show filebrowser -theme ~/.config/rofi/launcher.rasi"
   },
   "custom/clipboard": {
     "format": "󰅌",
@@ -52,8 +53,8 @@
     "format": "{id}",
     "sort-by": "id",
     "persistent-workspaces": { "1": [] },
-    "on-scroll-up": "hyprctl dispatch workspace e-1",
-    "on-scroll-down": "hyprctl dispatch workspace e+1"
+    "on-scroll-up": "hyprctl dispatch 'hl.dsp.focus({ workspace = \"e-1\" })'",
+    "on-scroll-down": "hyprctl dispatch 'hl.dsp.focus({ workspace = \"e+1\" })'"
   },
 
   "cpu": { "interval": 2, "format": "󰻠 {usage}%" },

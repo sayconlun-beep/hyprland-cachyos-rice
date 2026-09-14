@@ -4,9 +4,9 @@
 //
 // A broken lock screen can lock you out of your own session, so:
 //   - It uses ext-session-lock (WlSessionLock). Hyprland keeps the session
-//     locked even if Quickshell dies, and hyprland.conf sets
+//     locked even if Quickshell dies, and hyprland.lua sets
 //     misc:allow_session_lock_restore so another locker can take over - from
-//     a TTY: `hyprctl --instance 0 dispatch exec hyprlock`.
+//     a TTY: `hyprctl --instance 0 dispatch 'hl.dsp.exec_cmd("hyprlock")'`.
 //   - hypridle falls back to hyprlock whenever Quickshell is not running.
 //   - Passwords go through PAM with hyprlock's own config (/etc/pam.d/hyprlock),
 //     so the rules - faillock included - are the ones hyprlock used.

@@ -12,7 +12,7 @@ choice="$(printf '%s\n' "󰌾  Lock" "󰤄  Suspend" "󰍃  Log out" "󰜉  Rebo
 case "$choice" in
     *Lock)       loginctl lock-session ;;
     *Suspend)    systemctl suspend ;;
-    *"Log out")  confirm "Log out" && hyprctl dispatch exit ;;
+    *"Log out")  confirm "Log out" && hyprctl dispatch 'hl.dsp.exit()' ;;
     *Reboot)     confirm "Reboot" && systemctl reboot ;;
     *"Shut down") confirm "Shut down" && systemctl poweroff ;;
 esac

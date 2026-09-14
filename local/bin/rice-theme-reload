@@ -3,10 +3,10 @@
 # matugen only writes files; each app needs its own nudge to re-read them.
 CACHE="$HOME/.cache/rice"     # literal ~/.cache, matching matugen's config.toml
 
-# Hyprland: colors.conf is only read on reload, and a reload would also reset
-# live state (focus mode, runtime keywords), so apply the colours as keywords.
-if [[ -s "$CACHE/hypr-colors.batch" ]]; then
-    hyprctl --batch "$(< "$CACHE/hypr-colors.batch")" >/dev/null 2>&1
+# Hyprland: colors.lua is only read on reload, and a reload would also reset
+# live state (focus mode), so push the colours into the running config instead.
+if [[ -s "$CACHE/hypr-colors.lua" ]]; then
+    hyprctl eval "$(< "$CACHE/hypr-colors.lua")" >/dev/null 2>&1
 fi
 
 # waybar: nothing to do. reload_style_on_change picks up the new colors.css by
