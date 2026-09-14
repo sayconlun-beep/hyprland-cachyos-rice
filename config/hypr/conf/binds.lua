@@ -11,7 +11,7 @@ local exec, dsp = hl.dsp.exec_cmd, hl.dsp
 -- Your apps: point term, files and browser at whatever you use.
 local bin     = "~/.local/bin"          -- not on the session PATH - always spell it out
 local term    = "kitty"
-local files   = "dolphin"
+local files   = "thunar"
 local browser = "firefox"
 
 -- ------------------------------------------------------------------- apps --

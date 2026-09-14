@@ -12,7 +12,7 @@ sudo pacman -S --needed \
   kitty grim slurp satty wl-clipboard cliphist brightnessctl playerctl wireplumber \
   pavucontrol nm-connection-editor hyprsunset gpu-screen-recorder \
   jq curl socat imagemagick libnotify python python-gobject gtk-layer-shell \
-  cava fastfetch btop dolphin upower power-profiles-daemon github-cli \
+  cava fastfetch btop thunar tumbler gvfs upower power-profiles-daemon github-cli \
   adw-gtk-theme qt6ct nwg-look papirus-icon-theme ttf-jetbrains-mono-nerd inter-font
 ```
 
@@ -40,7 +40,7 @@ Plus `bibata-cursor-theme-bin` from the AUR, or change `XCURSOR_THEME` in
 | `socat`, `python-gobject`, `gtk-layer-shell` | read-aloud and its subtitle tile |
 | `cava` | desktop visualiser |
 | `github-cli` | the dashboard's GitHub tab (`gh auth login` once) |
-| `dolphin` | "show in folder" from screenshots and the GitHub tab |
+| `thunar`, `tumbler`, `gvfs` | file manager: "show in folder" from screenshots and the GitHub tab, thumbnails, trash and drives |
 | `adw-gtk-theme`, `qt6ct`, `nwg-look` | GTK and Qt apps following the palette |
 
 Services the control centre expects: NetworkManager, bluetooth (`bluez`) and

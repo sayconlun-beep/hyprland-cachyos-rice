@@ -504,7 +504,7 @@ RowLayout {
                                    modelData.behind ? "↓" + modelData.behind : "",
                                    modelData.changes ? modelData.changes + " changed" : "clean"].filter(x => x).join("  ·  ")
                             onClicked: {
-                                Quickshell.execDetached(["dolphin", modelData.path])
+                                Quickshell.execDetached(["thunar", modelData.path])
                                 page.dash.close()
                             }
 

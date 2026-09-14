@@ -80,7 +80,7 @@ Scope {
           call: () => root.notifications.show() },
         { section: "System", icon: "󰏘", label: "GTK appearance", hint: "theme, icons, cursor, fonts",
           run: ["nwg-look"] },
-        { section: "System", icon: "󰏘", label: "Qt appearance", hint: "Dolphin and other Qt apps",
+        { section: "System", icon: "󰏘", label: "Qt appearance", hint: "Qt apps such as Kate",
           run: ["qt6ct"] },
         { section: "System", icon: "󰄨", label: "Task manager",
           run: ["kitty", "--class", "taskmgr", "-e", "btop"] },

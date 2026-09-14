@@ -124,7 +124,7 @@ LABELS = [
     (r"^exec kitty$", "Terminal"),
     (r"^exec rofi -show drun", "App launcher"),
     (r"^exec rofi -show filebrowser", "File browser"),
-    (r"^exec dolphin$", "Files"),
+    (r"^exec (thunar|dolphin)$", "Files"),
     (r"^exec firefox$", "Browser"),
     (r"^killactive", "Close window"),
     (r"^exit", "Quit Hyprland"),

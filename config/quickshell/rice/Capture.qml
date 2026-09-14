@@ -121,7 +121,7 @@ Scope {
             + 'case "$act" in\n'
             + '  open) xdg-open "$file" ;;\n'
             + '  edit) satty --filename "$file" ;;\n'
-            + '  folder) dolphin --select "$file" ;;\n'
+            + '  folder) thunar "$file" ;;\n'
             + 'esac',
             "_", file, title, note, isImage ? "yes" : "no"])
     }

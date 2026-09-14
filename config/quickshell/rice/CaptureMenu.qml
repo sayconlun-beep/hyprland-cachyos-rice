@@ -419,7 +419,7 @@ Scope {
                                     cursorShape: Qt.PointingHandCursor
                                     onClicked: {
                                         root.close()
-                                        Quickshell.execDetached(["bash", "-c", 'mkdir -p "$1" && exec dolphin "$1"', "_", modelData.dir])
+                                        Quickshell.execDetached(["bash", "-c", 'mkdir -p "$1" && exec thunar "$1"', "_", modelData.dir])
                                     }
                                 }
                             }
