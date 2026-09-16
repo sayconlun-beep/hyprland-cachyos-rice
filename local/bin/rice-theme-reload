@@ -16,6 +16,10 @@ pkill -USR2 -x cava                     # colours only
 
 "$HOME/.local/bin/rice-kde-colors" >/dev/null 2>&1
 
+# The greeting's animated logo, tinted to match. New shells pick it up; a
+# greeting already on screen keeps the colours it was drawn with.
+"$HOME/.local/bin/rice-fetch-logo" >/dev/null 2>&1
+
 # GTK: follow `rice-wallpaper mode`. The theme name is set via Adwaita and
 # back, because GTK3 apps re-read their CSS only when the NAME changes.
 # adw-gtk3 (light) is only used if it is installed.

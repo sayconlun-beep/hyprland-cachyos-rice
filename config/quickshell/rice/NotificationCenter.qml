@@ -49,7 +49,7 @@ Scope {
                 left: true
                 right: true
             }
-            exclusionMode: ExclusionMode.Normal
+            exclusionMode: ExclusionMode.Ignore       // over the bar, so clicking it closes
             color: "transparent"
             WlrLayershell.layer: WlrLayer.Overlay
             WlrLayershell.namespace: "rice-notifcenter"
@@ -64,10 +64,10 @@ Scope {
                 id: panel
                 anchors.top: parent.top
                 anchors.right: parent.right
-                anchors.topMargin: 8
+                anchors.topMargin: Theme.barHeight + 8
                 anchors.rightMargin: 10
                 width: 460
-                height: Math.min(content.implicitHeight + 36, parent.height - 20)
+                height: Math.min(content.implicitHeight + 36, parent.height - Theme.barHeight - 20)
                 radius: 28
                 color: Theme.alpha(Theme.surface_container, 0.97)
                 border.width: 1

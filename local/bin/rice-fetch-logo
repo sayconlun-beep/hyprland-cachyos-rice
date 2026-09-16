@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# Tint the greeting's animated logo to the current palette.
+#
+# rice-theme-reload runs this after every matugen pass; rice-fetch.sh plays
+# the result. The source is ~/.config/fastfetch/logo-tint.gif - any GIF whose
+# look lives in its BRIGHTNESS (text art on black, say), because hue is thrown
+# away: each pixel's luma is mapped along
+#
+#     primary_container -> primary -> on_primary_container
+#
+# Those three roles swap ends between dark and light mode, so the brightest
+# parts of the logo always contrast most with the terminal - no mode check.
+# Without a source (or a palette yet) this does nothing and rice-fetch.sh
+# falls back to logo.gif / the still logo.
+set -uo pipefail
+
+SRC="${1:-$HOME/.config/fastfetch/logo-tint.gif}"
+CACHE="$HOME/.cache/rice"            # literal ~/.cache, matching matugen's config.toml
+PALETTE="$CACHE/quickshell-colors.json"
+OUT="$CACHE/fetch-logo.gif"
+
+[[ -r "$SRC" && -r "$PALETTE" ]] || exit 0
+command -v magick >/dev/null || exit 0
+
+stops=$(python3 - "$PALETTE" <<'EOF'
+import json, sys
+p = json.load(open(sys.argv[1]))
+print(p["primary_container"], p["primary"], p["on_primary_container"])
+EOF
+) || exit 0
+read -r lo mid hi <<< "$stops"
+
+# Frame 1 only ([0]): asking the whole file decodes every frame for one number.
+read -r size delay < <(magick identify -format '%wx%h %T\n' "$SRC[0]" 2>/dev/null)
+[[ -n "${size:-}" ]] || exit 0
+
+tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+magick -size 1x1 "xc:$lo" "xc:$mid" "xc:$hi" +append \
+       -filter triangle -resize '256x1!' "$tmp/clut.png" || exit 0
+
+# All frames are stacked into ONE tall image first: -clut pairs a single image
+# with the table and silently drops every other frame of a sequence.
+#  +repage       -append keeps frame 1's page size, and -crop honours it -
+#                without this the split back yields one frame, not all of them
+#  -colorspace   -grayscale leaves the image in Gray, where -clut cannot add colour
+#  -level 0,62%  text art rarely reaches full white (the sun peaks at ~56% luma),
+#                so stretch it or the whole logo sits in the dark half of the ramp
+#  -channel RGB  keeps level/clut off the alpha, which holds the transparency
+# Frames are all the same size here - `-coalesce` makes sure of it.
+magick "$SRC" -coalesce -append +repage \
+       -channel RGB -grayscale Rec709Luma -colorspace sRGB -level 0,62% \
+       "$tmp/clut.png" -clut +channel \
+       -crop "$size" +repage \
+       -set delay "$delay" \
+       -set dispose background -loop 0 "$tmp/logo.gif" || exit 0
+
+# Swap it in whole: a shell opened mid-write would otherwise play half a GIF.
+mkdir -p "$CACHE"
+mv -f "$tmp/logo.gif" "$OUT"

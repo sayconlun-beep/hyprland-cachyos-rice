@@ -6,7 +6,9 @@
 //   qs -c rice ipc call notifications toggle    notification centre (Super+N, bell)
 //   qs -c rice ipc call settings toggle         settings hub (bar gear, Super+,)
 //   qs -c rice ipc call wallpaper toggle        carousel (Super+Shift+W)
+//   qs -c rice ipc call wallhaven toggle        wallhaven search + filters (Super+Ctrl+W)
 //   qs -c rice ipc call binds toggle            keybind cheatsheet + editor (Super+/)
+//   qs -c rice ipc call displays toggle         drag screens into place (Settings › Displays)
 //   qs -c rice ipc call visualiser toggle       desktop cava (Super+Shift+V)
 //   qs -c rice ipc call clock toggle            desktop clock
 //   qs -c rice ipc call lyrics toggle           desktop lyrics
@@ -23,7 +25,9 @@ ShellRoot {
     id: shell
 
     WallpaperCarousel { id: walls }
+    Wallhaven { id: wallhaven }
     Keybinds { id: binds }
+    Displays { id: displays }
     Visualiser { id: visualiser }
     DesktopClock { id: clock }
     DesktopLyrics {
@@ -54,6 +58,7 @@ ShellRoot {
         lyrics: lyrics
         walls: walls
         binds: binds
+        displays: displays
         controlCenter: cc
         notifications: notifs
         dashboard: dash
@@ -62,7 +67,9 @@ ShellRoot {
 
     function closeOthers(keep) {
         if (keep !== walls) walls.cancel()
+        if (keep !== wallhaven) wallhaven.close()
         if (keep !== binds) binds.close()
+        if (keep !== displays) displays.close()
         if (keep !== cc) cc.close()
         if (keep !== settings) settings.close()
         if (keep !== notifs) notifs.close()
@@ -172,6 +179,39 @@ ShellRoot {
         function apply(): void { walls.commit() }
         function next(): void { walls.step(1) }
         function prev(): void { walls.step(-1) }
+    }
+
+    IpcHandler {
+        target: "wallhaven"
+        function toggle(): void { shell.closeOthers(wallhaven); wallhaven.toggle() }
+        function open(): void { shell.closeOthers(wallhaven); wallhaven.show() }
+        function close(): void { wallhaven.close() }
+        // Search with the saved filters, opening the panel.
+        function search(query: string): void {
+            shell.closeOthers(wallhaven)
+            wallhaven.query = query
+            wallhaven.show()
+            wallhaven.search()
+        }
+        // For checking: "<state> · <shown>/<total> · page <n>/<last> · <sorting>".
+        function status(): string {
+            const w = wallhaven
+            const state = w.error ? "error: " + w.error : w.loading ? "loading" : w.downloading ? "downloading" : "idle"
+            return `${state} · ${w.results.count}/${w.total} · page ${w.page}/${w.lastPage} · ${w.sorting}`
+        }
+    }
+
+    IpcHandler {
+        target: "displays"
+        function toggle(): void { shell.closeOthers(displays); displays.toggle() }
+        function open(): void { shell.closeOthers(displays); displays.show() }
+        function close(): void { displays.close() }
+        // For checking: "<outputs with positions> · dirty/clean".
+        function status(): string {
+            const d = displays
+            return d.outputs.map(o => `${o.name}@${d.layout[o.name].x},${d.layout[o.name].y}`).join(" ")
+                + (d.dirty ? " · unapplied" : " · applied") + (d.message ? " · " + d.message : "")
+        }
     }
 
     IpcHandler {

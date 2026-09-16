@@ -1,133 +1,138 @@
-// Wallpaper carousel: a strip of thumbnails over a full-screen view of the one
-// in the middle, with the palette it will give the rice.
+// Wallpaper carousel (Super+Shift+W): a curved wall of cards over the selected
+// wallpaper, dimmed. Every card slides along the wall; the one arriving in the
+// middle changes from the wallpaper you just left to its own with the chosen
+// transition effect, and applying plays that same effect over the whole
+// desktop before handing over to awww.
 //
-// Browsing is previewed for real, and nothing on screen is allowed to lag the
-// carousel - it all changes on the same frame:
-//   - the backdrop cross-fades to the new image,
-//   - the same image fades in under the bar, in a strip on the BOTTOM layer
-//     (above awww, below waybar), because awww needs ~0.25s to catch up,
-//   - waybar's colors.css is written straight from the cached palette, so the
-//     bar recolours at once instead of after matugen.
-// Behind all that, `rice-wallpaper preview` (after a short pause) really sets
-// the image and palette, so borders, cava and the bar's files are right.
+//   ← →  browse     Tab / Shift+Tab  effect     Space  replay the effect
+//   Enter  apply    type  filter by name        Esc  clear the filter, then close
 //
-// Enter commits (`rice-wallpaper commit`, every other app re-themes), Esc
-// previews the original again. Either way the overlay only closes once awww
-// shows the chosen image, so closing never reveals a stale wallpaper.
+// The effects are one shader, shaders/transition.frag (compiled to .qsb by
+// shaders/compile.sh); the choice is kept in ~/.cache/rice/transition.
+// Nothing on the desktop changes until Enter. Then a Bottom-layer window per
+// screen (above awww, under windows and the bar) runs the effect from the old
+// wallpaper to the new one; `rice-wallpaper commit` swaps awww and re-themes
+// halfway through, and the windows go once it has finished, so what they
+// uncover is already the new wallpaper.
 import QtQuick
-import QtQuick.Layouts
 import Quickshell
 import Quickshell.Io
 import Quickshell.Wayland
 import Quickshell.Hyprland
-import Quickshell.Widgets
 
 Scope {
     id: root
 
     property bool open: false
+    property bool closing: false
     property bool loading: false
-    property string closing: ""       // "" | "commit" | "cancel"
-    property string closeTarget: ""
-    property var walls: []            // [{path, name, thumb, colors}]
+    property var walls: []             // [{path, name, thumb, colors}]
     property int index: 0
-    property string original: ""      // on screen when the carousel opened
-    property string requested: ""     // last path handed to a preview
-    property string shown: ""         // path awww is known to display
-    property real barInset: 0         // height of the bar's exclusive zone
+    property string filter: ""
+    property string current: ""        // the wallpaper on screen
+    property int effect: 9             // burn
     property var targetScreen: null
-    property var queued: null
-    property var current: null        // the rice-wallpaper run in progress
-    property bool fading: false       // the backdrop is mid cross-fade
-    readonly property int fadeMs: 450
+
+    // Applying
+    property bool applying: false
+    property string applyFrom: ""
+    property string applyTo: ""
+    property bool committed: false
+    property bool commitDone: false
+    property int effectsDone: 0
 
     readonly property string home: Quickshell.env("HOME")
     readonly property string bin: home + "/.local/bin/"
-    readonly property var wall: walls.length ? walls[Math.max(0, Math.min(index, walls.length - 1))] : null
-    readonly property var pal: wall ? wall.colors : null
-
-    // The roles palette.css defines - waybar's colors.css must keep all of them.
-    readonly property var barRoles: ["primary", "on_primary", "primary_container", "on_primary_container",
-        "secondary", "on_secondary", "secondary_container", "on_secondary_container",
-        "tertiary", "on_tertiary", "error", "on_error",
-        "surface", "surface_container_low", "surface_container", "surface_container_high",
-        "surface_container_highest", "on_surface", "on_surface_variant",
-        "outline", "outline_variant", "shadow"]
-
-    // A role from the wallpaper being browsed, falling back to the live theme.
-    function c(role) {
-        return (pal && pal[role]) ? pal[role] : Theme[role]
-    }
+    readonly property string shader: "file://" + Quickshell.shellDir + "/shaders/transition.frag.qsb"
+    readonly property var effects: ["glitch", "dissolve", "ripple", "shatter", "crt",
+        "pixelate", "swirl", "flow", "slide", "burn"]
+    readonly property var shown: filter ? walls.filter(w => w.name.toLowerCase().includes(filter)) : walls
+    readonly property var wall: shown.length ? shown[Math.max(0, Math.min(index, shown.length - 1))] : null
 
     function show() {
-        if (open)
+        if (open && !closing)
+            return
+        closeTimer.stop()
+        closing = false
+        if (open)                      // reopened mid fade-out
             return
         targetScreen = focusedScreen()
-        loading = true
-        fading = false
-        closing = ""
+        filter = ""
+        index = Math.max(0, walls.findIndex(w => w.path === current))
+        loading = walls.length === 0
         open = true
         lister.running = true
     }
 
     function toggle() {
-        open ? cancel() : show()
+        open && !closing ? cancel() : show()
     }
 
     function cancel() {
-        finish("cancel", original)
+        if (!open || closing)
+            return
+        closing = true
+        closeTimer.restart()
     }
 
     function commit() {
-        if (wall)
-            finish("commit", wall.path)
+        if (!open || closing || !wall)
+            return
+        const path = wall.path
+        cancel()
+        if (path === current || applying)
+            return
+        applyFrom = current
+        applyTo = path
+        committed = false
+        commitDone = false
+        effectsDone = 0
+        applying = true
+        applySafety.restart()
     }
 
     function step(d) {
-        if (walls.length && !closing)
-            index = (index + d + walls.length) % walls.length
+        if (shown.length && !closing)
+            index = (index + d + shown.length) % shown.length
     }
 
-    function finish(kind, path) {
-        if (!open || closing)
-            return
-        if (!path) {                   // nothing loaded yet
-            open = false
-            return
-        }
-        debounce.stop()
-        barDebounce.stop()
-        closing = kind
-        closeTarget = path
-
-        const i = walls.findIndex(w => w.path === path)
-        if (i >= 0) {
-            index = i                  // Esc cross-fades back to the original first
-            writeBarColours(walls[i])
-        }
-        safety.restart()
-        if (shown === path && !worker.running && !queued) {
-            done(false)
-            return
-        }
-        if (worker.running && current && current.kind === "preview" && current.path === path)
-            queued = null              // already on its way
-        else
-            run("preview", path)
+    function setFilter(f) {
+        const keep = wall ? wall.path : current
+        filter = f
+        index = Math.max(0, shown.findIndex(w => w.path === keep))
     }
 
-    // Closing mid cross-fade would cut the fade short, so wait for it
-    // (onFadingChanged comes back here) unless the safety timer forces it.
-    function done(force) {
-        if (fading && !force)
+    function setEffect(i) {
+        effect = (i + effects.length) % effects.length
+        effectFile.setText(effects[effect] + "\n")
+    }
+
+    function startCommit() {
+        if (committed)
             return
-        safety.stop()
-        const kind = closing, path = closeTarget
-        open = false
-        closing = ""
-        fading = false
-        if (kind === "commit")
-            run("commit", path)
+        committed = true
+        worker.command = [bin + "rice-wallpaper", "commit", applyTo]
+        worker.running = true
+    }
+
+    function maybeFinishApply() {
+        if (applying && commitDone && effectsDone >= Quickshell.screens.length) {
+            applySafety.stop()
+            applying = false
+        }
+    }
+
+    function smooth(e0, e1, x) {
+        const t = Math.max(0, Math.min(1, (x - e0) / (e1 - e0)))
+        return t * t * (3 - 2 * t)
+    }
+
+    // values[n] is the value n cards out from the middle; in between, a straight line.
+    function table(values, a) {
+        const last = values.length - 1
+        const i = Math.min(Math.floor(a), last - 1)
+        const f = Math.min(a - i, 1)
+        return values[i] + (values[i + 1] - values[i]) * f
     }
 
     function focusedScreen() {
@@ -139,79 +144,42 @@ Scope {
         return screens[0]
     }
 
-    function writeBarColours(w) {
-        if (!w || !w.colors)
-            return
-        let css = `/* Written by the wallpaper carousel from ${w.path} - matugen replaces it. */\n`
-        for (const role of barRoles)
-            if (w.colors[role])
-                css += `@define-color ${role} ${w.colors[role]};\n`
-        barCss.setText(css)
-    }
-
-    // One rice-wallpaper at a time, newest request wins: a preview finishing
-    // after a commit would leave the wrong image up.
-    function run(kind, path) {
-        queued = { kind: kind, path: path }
-        drain()
-    }
-
-    function drain() {
-        if (worker.running || !queued)
-            return
-        current = queued
-        queued = null
-        worker.command = [bin + "rice-wallpaper", current.kind, current.path]
-        worker.running = true
-    }
-
-    onIndexChanged: {
-        if (!open || loading || closing || !wall)
-            return
-        barDebounce.restart()
-        debounce.restart()
-    }
-
-    onFadingChanged: {
-        if (!fading && closing && shown === closeTarget && !worker.running && !queued)
-            done(false)
-    }
-
-    // Lands the bar's recolour partway through the image cross-fade, so
-    // neither leads; also coalesces a held arrow key.
     Timer {
-        id: barDebounce
+        id: closeTimer
         interval: 200
-        onTriggered: root.writeBarColours(root.wall)
-    }
-
-    Timer {
-        id: debounce
-        interval: 120
         onTriggered: {
-            if (root.open && root.wall && root.wall.path !== root.requested) {
-                root.requested = root.wall.path
-                root.run("preview", root.wall.path)
-            }
+            root.open = false
+            root.closing = false
         }
     }
 
-    // If rice-wallpaper hangs, close anyway rather than trap the keyboard.
+    // If an image never loads or rice-wallpaper hangs, don't leave the
+    // transition window covering the desktop.
     Timer {
-        id: safety
-        interval: 2500
-        onTriggered: if (root.closing) root.done(true)
+        id: applySafety
+        interval: 8000
+        onTriggered: {
+            root.startCommit()
+            root.applying = false
+        }
+    }
+
+    FileView {
+        id: effectFile
+        path: root.home + "/.cache/rice/transition"
+        onLoaded: {
+            const i = root.effects.indexOf(text().trim())
+            if (i >= 0)
+                root.effect = i
+        }
     }
 
     Process {
         id: worker
         onExited: {
-            if (root.current && root.current.kind === "preview")
-                root.shown = root.current.path
-            root.current = null
-            if (root.closing && root.shown === root.closeTarget && !root.queued)
-                root.done(false)
-            Qt.callLater(root.drain)
+            root.current = root.applyTo
+            root.commitDone = true
+            root.maybeFinishApply()
         }
     }
 
@@ -222,136 +190,16 @@ Scope {
             onStreamFinished: {
                 try {
                     const data = JSON.parse(text)
-                    root.original = data.current
-                    root.requested = data.current
-                    root.shown = data.current
-                    root.walls = data.walls
-                    root.index = Math.max(0, data.walls.findIndex(w => w.path === data.current))
+                    const first = root.walls.length === 0
+                    root.current = data.current
+                    if (JSON.stringify(data.walls) !== JSON.stringify(root.walls))
+                        root.walls = data.walls
+                    if (first)
+                        root.index = Math.max(0, root.shown.findIndex(w => w.path === data.current))
                 } catch (e) {
                     console.warn("WallpaperCarousel: bad list:", e)
                 }
                 root.loading = false
-            }
-        }
-    }
-
-    FileView {
-        id: barCss
-        path: root.home + "/.config/waybar/colors.css"
-        preload: false
-        atomicWrites: false            // written in place, like matugen does
-    }
-
-    // The previewed image laid out on the WHOLE output, cropped the way awww
-    // crops. Both windows use it; same source and size share one decode.
-    //
-    // A real cross-fade: the image on screen stays fully opaque while the next
-    // one fades in ON TOP of it, and only once that image has decoded - the
-    // big wallpapers take longer than the fade, so fading an empty slot made
-    // the picture pop in. Browsing on mid-fade stacks the next one above, and
-    // everything underneath is dropped once the top one is fully in.
-    component Backdrop: Item {
-        id: backdrop
-
-        property bool reports: false   // the overlay's copy: closing waits for its fade
-        property bool settled: true
-        property bool revealedOnce: false
-        property int stack: 0
-
-        onSettledChanged: if (reports) root.fading = !settled
-
-        function settle(i) {
-            for (let j = 0; j < slots.count; j++) {
-                const s = slots.itemAt(j)
-                if (s && j !== i)
-                    s.opacity = 0
-            }
-            revealedOnce = true
-            settled = true
-        }
-
-        Repeater {
-            id: slots
-            model: root.walls
-
-            Loader {
-                id: slot
-                required property var modelData
-                required property int index
-                readonly property bool isShown: index === root.index
-                readonly property bool ready: item !== null
-                    && (item.status === Image.Ready || item.status === Image.Error)
-
-                anchors.fill: parent
-                active: isShown || Math.abs(index - root.index) <= 1 || opacity > 0
-                visible: opacity > 0
-                opacity: 0
-
-                function target() {
-                    z = ++backdrop.stack
-                    backdrop.settled = false
-                    reveal()
-                }
-
-                function reveal() {
-                    if (!isShown || !ready || fadeIn.running)
-                        return
-                    if (opacity >= 1) {
-                        backdrop.settle(index)
-                        return
-                    }
-                    // The first image rides the overlay's own fade-in.
-                    fadeIn.duration = backdrop.revealedOnce ? root.fadeMs : 180
-                    fadeIn.start()
-                }
-
-                Component.onCompleted: if (isShown) target()
-                onIsShownChanged: isShown ? target() : fadeIn.stop()
-                onReadyChanged: reveal()
-
-                NumberAnimation {
-                    id: fadeIn
-                    target: slot
-                    property: "opacity"
-                    to: 1
-                    easing.type: Easing.InOutQuad
-                    onFinished: if (slot.isShown) backdrop.settle(slot.index)
-                }
-
-                sourceComponent: Image {
-                    source: "file://" + slot.modelData.path
-                    fillMode: Image.PreserveAspectCrop
-                    asynchronous: true
-                    sourceSize.width: slot.width
-                    sourceSize.height: slot.height
-                }
-            }
-        }
-    }
-
-    // Under the bar. Created with the overlay, not on the first move: a Loader
-    // made mid-browse starts at full opacity and pops in ahead of the backdrop's
-    // cross-fade. Made up front it shows what awww shows, then fades in step.
-    LazyLoader {
-        active: root.open && root.barInset > 0
-
-        PanelWindow {
-            screen: root.targetScreen
-            anchors {
-                top: true
-                left: true
-                right: true
-            }
-            implicitHeight: root.barInset
-            exclusionMode: ExclusionMode.Ignore
-            color: "transparent"
-            WlrLayershell.layer: WlrLayer.Bottom
-            WlrLayershell.namespace: "rice-wallpaper-strip"
-            WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
-
-            Backdrop {
-                width: parent.width
-                height: root.targetScreen ? root.targetScreen.height : parent.height
             }
         }
     }
@@ -367,8 +215,7 @@ Scope {
                 left: true
                 right: true
             }
-            // Out of the bar's exclusive zone, so the bar stays visible.
-            exclusionMode: ExclusionMode.Normal
+            exclusionMode: ExclusionMode.Ignore
             color: "transparent"
             WlrLayershell.layer: WlrLayer.Overlay
             WlrLayershell.namespace: "rice-wallpaper"
@@ -376,86 +223,141 @@ Scope {
 
             Item {
                 id: stage
-                // The window starts below the bar's zone; awww crops to the
-                // whole output, so the backdrop is shifted up by the zone.
-                readonly property real topInset: root.targetScreen ? Math.max(0, root.targetScreen.height - height) : 0
-                onTopInsetChanged: root.barInset = topInset
+
+                readonly property real cardW: Math.min(width * 0.3, 1000)
+                readonly property real cardH: cardW / 1.6
+                readonly property real cx: width / 2
+                readonly property real cy: height * 0.42
+                readonly property bool hasWalls: root.shown.length > 0
+                property real appear: 0
+                property real intro: 0          // cards appearing, 0 -> 1
+                // The thumbnail of the card last in the middle: the next card to
+                // arrive changes from this to its own image.
+                property Item selectedThumb: null
+
+                signal replayRequested
 
                 anchors.fill: parent
                 focus: true
-                opacity: 0
-                Component.onCompleted: {
-                    root.barInset = topInset
-                    forceActiveFocus()
-                    opacity = 1
-                }
+                opacity: root.closing ? 0 : appear
                 Behavior on opacity {
                     NumberAnimation { duration: 180; easing.type: Easing.OutCubic }
+                }
+
+                Component.onCompleted: {
+                    forceActiveFocus()
+                    appear = 1
+                    if (hasWalls)
+                        introAnim.start()
+                }
+                onHasWallsChanged: if (hasWalls && intro === 0 && !introAnim.running) introAnim.start()
+
+                NumberAnimation {
+                    id: introAnim
+                    target: stage
+                    property: "intro"
+                    from: 0
+                    to: 1
+                    duration: 820
                 }
 
                 Keys.onPressed: event => {
                     event.accepted = true
                     if (root.closing)
                         return
-                    switch (event.key) {
-                    case Qt.Key_Left: case Qt.Key_H: case Qt.Key_A:
-                        root.step(-1); break
-                    case Qt.Key_Right: case Qt.Key_L: case Qt.Key_D:
-                        root.step(1); break
-                    case Qt.Key_Home:
-                        root.index = 0; break
-                    case Qt.Key_End:
-                        root.index = root.walls.length - 1; break
-                    case Qt.Key_Return: case Qt.Key_Enter: case Qt.Key_Space:
-                        root.commit(); break
-                    case Qt.Key_Escape: case Qt.Key_Q:
-                        root.cancel(); break
-                    default:
+                    const k = event.key
+                    const mods = event.modifiers & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier)
+                    if (k === Qt.Key_Left)
+                        root.step(-1)
+                    else if (k === Qt.Key_Right)
+                        root.step(1)
+                    else if (k === Qt.Key_Home)
+                        root.index = 0
+                    else if (k === Qt.Key_End)
+                        root.index = root.shown.length - 1
+                    else if (k === Qt.Key_Tab) {
+                        root.setEffect(root.effect + 1)
+                        stage.replayRequested()
+                    } else if (k === Qt.Key_Backtab) {
+                        root.setEffect(root.effect - 1)
+                        stage.replayRequested()
+                    } else if (k === Qt.Key_Space)
+                        stage.replayRequested()
+                    else if (k === Qt.Key_Return || k === Qt.Key_Enter)
+                        root.commit()
+                    else if (k === Qt.Key_Escape)
+                        root.filter ? root.setFilter("") : root.cancel()
+                    else if (k === Qt.Key_Backspace)
+                        root.setFilter(root.filter.slice(0, -1))
+                    else if (!mods && event.text && event.text.trim())
+                        root.setFilter(root.filter + event.text.toLowerCase())
+                    else
                         event.accepted = false
-                    }
                 }
 
-                // Solid ground, so a cross-fade never lets the windows show through.
                 Rectangle {
                     anchors.fill: parent
-                    color: root.c("surface")
+                    color: "black"
                 }
 
-                Backdrop {
-                    reports: true
-                    x: 0
-                    y: -stage.topInset
-                    width: stage.width
-                    height: stage.height + stage.topInset
+                // The wallpaper on screen, dimmed.
+                Image {
+                    anchors.fill: parent
+                    source: root.current ? "file://" + root.current : ""
+                    fillMode: Image.PreserveAspectCrop
+                    sourceSize.width: width
+                    sourceSize.height: height
+                    asynchronous: true
+                    opacity: status === Image.Ready ? 0.3 : 0
+                    Behavior on opacity {
+                        NumberAnimation { duration: 250 }
+                    }
                 }
 
                 Rectangle {
-                    anchors {
-                        left: parent.left
-                        right: parent.right
-                        bottom: parent.bottom
-                    }
-                    height: parent.height * 0.5
+                    anchors.fill: parent
                     gradient: Gradient {
-                        GradientStop { position: 0.0; color: "transparent" }
-                        GradientStop { position: 1.0; color: Qt.rgba(0, 0, 0, 0.55) }
+                        GradientStop { position: 0.0; color: Qt.rgba(0, 0, 0, 0.35) }
+                        GradientStop { position: 0.35; color: "transparent" }
+                        GradientStop { position: 0.7; color: "transparent" }
+                        GradientStop { position: 1.0; color: Qt.rgba(0, 0, 0, 0.45) }
                     }
                 }
 
-                Rectangle {
-                    id: card
-                    anchors.horizontalCenter: parent.horizontalCenter
-                    anchors.bottom: parent.bottom
-                    anchors.bottomMargin: 56
-                    width: Math.min(parent.width - 120, 1640)
-                    height: 380
-                    radius: 30
-                    color: Theme.alpha(root.c("surface_container"), 0.86)
-                    border.width: 1
-                    border.color: Theme.alpha(root.c("outline_variant"), 0.7)
-                    Behavior on color {
-                        ColorAnimation { duration: 300 }
+                MouseArea {
+                    anchors.fill: parent
+                    onClicked: root.cancel()
+                }
+
+                Text {
+                    x: 30
+                    y: 24
+                    text: "~/Pictures/Wallpapers" + (root.filter ? "   /   " + root.filter + "▏" : "")
+                    color: Theme.alpha(Theme.on_surface, 0.55)
+                    font.family: Theme.font
+                    font.pixelSize: 14
+                }
+
+                Text {
+                    anchors.right: parent.right
+                    anchors.rightMargin: 30
+                    y: 24
+                    text: root.shown.length ? `${root.index + 1} of ${root.shown.length}` : ""
+                    color: Theme.alpha(Theme.on_surface, 0.55)
+                    font.family: Theme.font
+                    font.pixelSize: 14
+                }
+
+                // The wall of cards.
+                Item {
+                    id: ring
+
+                    property real pos: root.index
+                    Behavior on pos {
+                        NumberAnimation { duration: 340; easing.type: Easing.OutCubic }
                     }
+
+                    anchors.fill: parent
 
                     WheelHandler {
                         onWheel: event => {
@@ -464,125 +366,350 @@ Scope {
                         }
                     }
 
-                    ColumnLayout {
-                        anchors.fill: parent
-                        anchors.margins: 26
-                        spacing: 14
+                    Repeater {
+                        model: root.shown
 
-                        ListView {
-                            id: strip
-                            readonly property int itemWidth: 300
+                        Item {
+                            id: card
+                            required property var modelData
+                            required property int index
+                            readonly property real o: index - ring.pos
+                            readonly property real a: Math.abs(o)
+                            readonly property real side: o < 0 ? -1 : 1
+                            readonly property bool selected: index === root.index
+                            // Cards appear from the middle outwards.
+                            readonly property real p: Math.max(0, Math.min(1, stage.intro * 1.6 - 0.15 - Math.min(a, 6) * 0.075))
+                            property Item fromThumb: null   // what it changes from on arrival
+                            property real change: 1         // that change, 0 -> 1
 
-                            Layout.fillWidth: true
-                            Layout.fillHeight: true
-                            orientation: ListView.Horizontal
-                            interactive: false        // index is driven by keys and wheel only
-                            spacing: 22
-                            model: root.walls
-                            currentIndex: root.index
-                            highlightRangeMode: ListView.StrictlyEnforceRange
-                            preferredHighlightBegin: width / 2 - itemWidth / 2
-                            preferredHighlightEnd: width / 2 + itemWidth / 2
-                            highlightMoveDuration: 280
+                            // Arriving in the middle: change from the card that was
+                            // there. Only the new card acts, so the order the two
+                            // cards hear about the new index doesn't matter.
+                            function arrive() {
+                                fromThumb = stage.selectedThumb
+                                stage.selectedThumb = thumb
+                                if (stage.intro >= 1)
+                                    play()
+                            }
 
-                            delegate: Item {
-                                id: tile
-                                required property var modelData
-                                required property int index
-                                readonly property bool isCurrent: index === root.index
+                            function play() {
+                                changeAnim.stop()
+                                change = 0
+                                changeAnim.start()
+                            }
 
-                                width: strip.itemWidth
-                                height: strip.height
-                                z: isCurrent ? 1 : 0
-
-                                ClippingRectangle {
-                                    anchors.centerIn: parent
-                                    width: parent.width
-                                    height: width * 10 / 16
-                                    radius: 18
-                                    color: root.c("surface_container_high")
-                                    border.width: tile.isCurrent ? 3 : 0
-                                    border.color: root.c("primary")
-                                    scale: tile.isCurrent ? 1.22 : 0.86
-                                    opacity: tile.isCurrent ? 1 : 0.55
-                                    Behavior on scale {
-                                        NumberAnimation { duration: 240; easing.type: Easing.OutCubic }
-                                    }
-                                    Behavior on opacity {
-                                        NumberAnimation { duration: 240 }
-                                    }
-
-                                    Image {
-                                        anchors.fill: parent
-                                        source: "file://" + tile.modelData.thumb
-                                        fillMode: Image.PreserveAspectCrop
-                                        asynchronous: true
-                                    }
-                                }
-
-                                MouseArea {
-                                    anchors.fill: parent
-                                    onClicked: tile.isCurrent ? root.commit() : root.index = tile.index
+                            onSelectedChanged: {
+                                if (selected) {
+                                    arrive()
+                                } else {
+                                    changeAnim.stop()
+                                    change = 1
                                 }
                             }
-                        }
+                            Component.onCompleted: if (selected) stage.selectedThumb = thumb
 
-                        RowLayout {
-                            Layout.fillWidth: true
-                            spacing: 14
-
-                            Text {
-                                Layout.maximumWidth: 560
-                                elide: Text.ElideRight
-                                text: root.wall ? root.wall.name
-                                    : root.loading ? "Building thumbnails and palettes…"
-                                    : "No wallpapers in ~/Pictures/Wallpapers"
-                                color: root.c("on_surface")
-                                font.family: Theme.font
-                                font.pixelSize: 21
-                                font.weight: Font.DemiBold
-                            }
-
-                            Text {
-                                text: root.walls.length ? `${root.index + 1} / ${root.walls.length}` : ""
-                                color: root.c("on_surface_variant")
-                                font.family: Theme.mono
-                                font.pixelSize: 14
-                            }
-
-                            Item { Layout.fillWidth: true }
-
-                            Row {
-                                spacing: 8
-                                Repeater {
-                                    model: ["primary", "secondary", "tertiary", "primary_container",
-                                            "surface_container_highest", "on_surface"]
-
-                                    Rectangle {
-                                        required property string modelData
-                                        width: 28
-                                        height: 28
-                                        radius: 14
-                                        color: root.c(modelData)
-                                        border.width: 1
-                                        border.color: Theme.alpha(root.c("on_surface"), 0.25)
-                                        Behavior on color {
-                                            ColorAnimation { duration: 300 }
-                                        }
-                                    }
+                            Connections {
+                                target: stage
+                                function onReplayRequested() {
+                                    if (card.selected)
+                                        card.play()
                                 }
                             }
 
-                            Item { implicitWidth: 18 }
+                            NumberAnimation {
+                                id: changeAnim
+                                target: card
+                                property: "change"
+                                from: 0
+                                to: 1
+                                duration: root.effect === 0 ? 460 : 580
+                            }
 
-                            Text {
-                                text: "←  →  browse     Enter  apply     Esc  cancel"
-                                color: root.c("on_surface_variant")
-                                font.family: Theme.font
-                                font.pixelSize: 14
+                            // The wall curves towards you: side cards are squeezed
+                            // flat and only slightly tilted, outer edge nearer, so
+                            // they stay smaller than the middle one (a real 3D
+                            // rotation this big makes their near edges huge).
+                            visible: a < 4.5
+                            width: stage.cardW
+                            height: stage.cardH
+                            x: stage.cx - width / 2 + side * root.table([0, 0.73, 1.23, 1.62, 1.95], a) * stage.cardW
+                            y: stage.cy - height / 2
+                            z: 100 - a
+                            scale: root.table([1, 0.93, 0.7, 0.55, 0.45], a)
+                            opacity: 1 - root.smooth(3.2, 4.4, a)
+                            transform: [
+                                Scale {
+                                    origin.x: card.width / 2
+                                    origin.y: card.height / 2
+                                    xScale: root.table([1, 0.52, 0.56, 0.6, 0.6], card.a)
+                                },
+                                Rotation {
+                                    origin.x: card.width / 2
+                                    origin.y: card.height / 2
+                                    axis { x: 0; y: 1; z: 0 }
+                                    angle: -card.side * root.table([0, 16, 14, 12, 12], card.a)
+                                }
+                            ]
+
+                            Image {
+                                id: thumb
+                                anchors.fill: parent
+                                source: "file://" + card.modelData.thumb
+                                fillMode: Image.PreserveAspectCrop
+                                asynchronous: true
+                                visible: false
+                            }
+
+                            ShaderEffect {
+                                readonly property bool introducing: card.p < 1
+                                anchors.fill: parent
+                                property var fromImage: introducing || !card.fromThumb ? thumb : card.fromThumb
+                                property var toImage: thumb
+                                property real progress: introducing ? card.p : card.change
+                                property real mode: root.effect
+                                property real aspect: width / Math.max(1, height)
+                                property real seed: card.index * 7.3
+                                property real blank: introducing || !card.fromThumb ? 1 : 0
+                                fragmentShader: root.shader
+                            }
+
+                            Rectangle {
+                                anchors.fill: parent
+                                color: "black"
+                                opacity: Math.min(card.a, 4) * 0.12 * card.p
+                            }
+
+                            // The outline travels with the selected card; it shows
+                            // before the cards themselves have appeared.
+                            Rectangle {
+                                anchors.fill: parent
+                                anchors.margins: -2
+                                color: "transparent"
+                                border.width: 1.5
+                                border.color: Theme.primary
+                                opacity: card.selected ? 1 : 0
+                                Behavior on opacity {
+                                    NumberAnimation { duration: 180 }
+                                }
+                            }
+
+                            // A spark running along the bottom edge while it changes.
+                            Rectangle {
+                                width: parent.width * 0.14
+                                height: 3
+                                x: (parent.width - width) * card.change
+                                y: parent.height - 1
+                                color: Theme.primary
+                                opacity: card.selected && changeAnim.running ? 1 : 0
+                                Behavior on opacity {
+                                    NumberAnimation { duration: 200 }
+                                }
+                            }
+
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: card.selected ? root.commit() : root.index = card.index
                             }
                         }
                     }
+                }
+
+                Column {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    y: stage.cy + stage.cardH / 2 + 60
+                    spacing: 14
+
+                    Text {
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        text: root.wall ? root.wall.path.split("/").pop()
+                            : root.loading ? "Building thumbnails…"
+                            : root.filter ? `Nothing matches “${root.filter}”`
+                            : "No wallpapers in ~/Pictures/Wallpapers"
+                        color: Theme.on_surface
+                        font.family: Theme.font
+                        font.pixelSize: 20
+                    }
+
+                    Row {
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        spacing: 8
+                        Repeater {
+                            model: root.wall ? ["primary", "secondary", "tertiary", "primary_container",
+                                "surface_container_highest"] : []
+                            Rectangle {
+                                required property string modelData
+                                width: 10
+                                height: 10
+                                radius: 5
+                                color: root.wall.colors[modelData] ?? "transparent"
+                                Behavior on color {
+                                    ColorAnimation { duration: 300 }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Row {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    anchors.bottom: parent.bottom
+                    anchors.bottomMargin: 78
+                    spacing: 34
+
+                    Repeater {
+                        model: root.effects
+
+                        Text {
+                            required property string modelData
+                            required property int index
+                            readonly property bool active: index === root.effect
+                            text: modelData
+                            color: active ? Theme.primary : Theme.alpha(Theme.on_surface, effectArea.containsMouse ? 0.8 : 0.42)
+                            font.family: Theme.font
+                            font.pixelSize: 15
+                            font.weight: active ? Font.DemiBold : Font.Normal
+
+                            MouseArea {
+                                id: effectArea
+                                anchors.fill: parent
+                                anchors.margins: -8
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    root.setEffect(parent.index)
+                                    stage.replayRequested()
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Text {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    anchors.bottom: parent.bottom
+                    anchors.bottomMargin: 44
+                    text: "←  →  browse       tab  effect       space  replay       enter  apply       type to filter       esc  close"
+                    color: Theme.alpha(Theme.on_surface, 0.3)
+                    font.family: Theme.font
+                    font.pixelSize: 12
+                }
+            }
+        }
+    }
+
+    // Applying: the effect over the real desktop, on every screen.
+    LazyLoader {
+        active: root.applying
+
+        Variants {
+            model: Quickshell.screens
+
+            PanelWindow {
+                id: fx
+                required property var modelData
+                property real progress: 0
+                property bool done: false
+                readonly property real dpr: modelData.devicePixelRatio || 1
+
+                screen: modelData
+                anchors {
+                    top: true
+                    bottom: true
+                    left: true
+                    right: true
+                }
+                exclusionMode: ExclusionMode.Ignore
+                color: "transparent"
+                mask: Region {}
+                WlrLayershell.layer: WlrLayer.Bottom
+                WlrLayershell.namespace: "rice-wallpaper-transition"
+                WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
+
+                function ok(img) {
+                    return img.source.toString() === "" || img.status === Image.Ready || img.status === Image.Error
+                }
+
+                function tryStart() {
+                    if (!done && !fxAnim.running && progress === 0 && ok(fromFull) && ok(toFull))
+                        fxAnim.start()
+                }
+
+                // awww should be showing the new image by the time this ends.
+                onProgressChanged: if (progress >= 0.5) root.startCommit()
+                Component.onCompleted: Qt.callLater(tryStart)
+
+                Image {
+                    id: fromFull
+                    anchors.fill: parent
+                    source: root.applyFrom ? "file://" + root.applyFrom : ""
+                    fillMode: Image.PreserveAspectCrop
+                    sourceSize.width: fx.modelData.width * fx.dpr
+                    sourceSize.height: fx.modelData.height * fx.dpr
+                    asynchronous: true
+                    onStatusChanged: fx.tryStart()
+                }
+
+                Image {
+                    id: toFull
+                    anchors.fill: parent
+                    source: "file://" + root.applyTo
+                    fillMode: Image.PreserveAspectCrop
+                    sourceSize.width: fx.modelData.width * fx.dpr
+                    sourceSize.height: fx.modelData.height * fx.dpr
+                    asynchronous: true
+                    onStatusChanged: fx.tryStart()
+                }
+
+                // Rendered copies, so the shader gets the images cropped the way
+                // awww crops them rather than the whole files.
+                ShaderEffectSource {
+                    id: fromTex
+                    anchors.fill: parent
+                    sourceItem: fromFull
+                    hideSource: true
+                    visible: false
+                }
+
+                ShaderEffectSource {
+                    id: toTex
+                    anchors.fill: parent
+                    sourceItem: toFull
+                    hideSource: true
+                    visible: false
+                }
+
+                ShaderEffect {
+                    anchors.fill: parent
+                    property var fromImage: fromTex
+                    property var toImage: toTex
+                    property real progress: fx.progress
+                    property real mode: root.effect
+                    property real aspect: width / Math.max(1, height)
+                    property real seed: 42
+                    property real blank: 0
+                    fragmentShader: root.shader
+                }
+
+                NumberAnimation {
+                    id: fxAnim
+                    target: fx
+                    property: "progress"
+                    from: 0
+                    to: 1
+                    duration: root.effect === 0 ? 700 : 900
+                    onFinished: {
+                        fx.done = true
+                        root.effectsDone++
+                        root.maybeFinishApply()
+                    }
+                }
+
+                // Start anyway if an image is slow to decode.
+                Timer {
+                    interval: 2500
+                    running: true
+                    onTriggered: if (!fx.done && !fxAnim.running) fxAnim.start()
                 }
             }
         }

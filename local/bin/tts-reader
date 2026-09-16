@@ -1,0 +1,2556 @@
+#!/usr/bin/env python3
+"""
+TTS Reader - GTK4 + libadwaita audiobook-style reader on piper and Kokoro voices.
+
+Open an EPUB, PDF, DOCX or Markdown file, pick a chapter from the sidebar (or click any sentence)
+and it reads from there, highlighting the sentence being spoken.
+
+Same engine shape as read-aloud.sh - one WAV per sentence queued into mpv -
+with one difference: rendering starts wherever you jump to instead of at
+sentence 0. A single long-lived piper process takes sentences one line at a
+time over --json-input (the 61MB voice loads once, then ~0.1s per sentence),
+or kokoro-tts speaks the same protocol for the Kokoro voices (its model loads
+once, then a sentence takes about a fifth of its length), and only a window around the playhead is rendered, so jumping anywhere in a
+book is near-instant and RAM (tmpfs) stays bounded.
+
+mpv listens on the same socket as read-aloud.sh, so the Super+P / Super+[ /
+Super+] / Super+Shift+P hotkeys drive this too. Closing the window while
+audio plays keeps reading in the background and brings up tts-tile.py;
+opening the app again hides the tile.
+
+    tts-reader [book.epub | book.pdf | doc.docx | notes.md]
+"""
+
+import bisect
+import hashlib
+import html
+import json
+import os
+import posixpath
+import re
+import socket
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import wave
+import zipfile
+from urllib.parse import unquote
+
+import gi
+
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
+gi.require_version("Poppler", "0.18")
+from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk, Pango, Poppler  # noqa: E402
+from lxml import etree  # noqa: E402
+
+APP_ID = "rice.TtsReader"
+HOME = os.path.expanduser("~")
+PIPER = f"{HOME}/.local/share/piper-tts/piper/piper"
+VOICES = f"{HOME}/.local/share/piper-tts/voices"
+DEFAULT_VOICE = "kokoro:bm_fable"
+PIPER_DEFAULT_VOICE = "en_GB-jenny_dioco-medium"    # when Kokoro isn't set up
+KOKORO = f"{HOME}/.local/bin/kokoro-tts"         # kokoro-tts --setup installs it
+KOKORO_DIR = f"{HOME}/.local/share/kokoro-tts"
+TILE = f"{HOME}/.local/bin/tts-tile.py"
+READ_ALOUD = f"{HOME}/.local/bin/read-aloud.sh"
+RUN = os.environ.get("XDG_RUNTIME_DIR", "/tmp")
+SOCK = f"{RUN}/read-aloud.sock"          # shared with the read-aloud hotkeys
+RDIR = f"{RUN}/tts-reader.d"
+DATA = os.path.join(os.environ.get("XDG_DATA_HOME", f"{HOME}/.local/share"),
+                    "tts-reader")
+LIBRARY = f"{DATA}/library.json"
+
+AHEAD = 12          # sentences rendered ahead of the playhead
+TTS_KEEP = 3        # voice processes kept loaded (paragraph voices alternate)
+KEEP_BEHIND = 20    # sentences kept behind it, so stepping back is instant
+WPM = 160           # for the time-left estimate at 1.0x
+
+
+class BookError(Exception):
+    pass
+
+
+# -- text -------------------------------------------------------------------
+# The splitter is read-aloud.sh's, so both read a sentence the same way.
+ABBRS = {"mr", "mrs", "ms", "dr", "prof", "st", "vs", "etc", "no", "fig",
+         "al", "jr", "sr", "capt", "lt", "sgt", "rev", "hon", "inc", "ltd"}
+
+
+def split_sentences(para):
+    out, start = [], 0
+    for m in re.finditer(r"[.!?]+[\"')\]”’]*\s+", para):
+        head = para[start:m.start()]
+        last = re.search(r"([A-Za-z.]+)$", head)
+        if last and last.group(1).lower().strip(".") in ABBRS:
+            continue          # "Mr. Darcy", not two sentences
+        nxt = para[m.end():m.end() + 1]
+        if nxt and nxt.islower():
+            continue          # dialogue plus its attribution stays together
+        out.append(para[start:m.end()].strip())
+        start = m.end()
+    tail = para[start:].strip()
+    if tail:
+        out.append(tail)
+    result = []
+    for s in out:
+        # A very long sentence would sit highlighted (and on the tile) for
+        # far too long, so break it at clause boundaries.
+        if len(s.split()) > 45:
+            cur = []
+            for piece in re.split(r"(?<=[,;:—])\s+", s):
+                cur.append(piece)
+                if len(" ".join(cur).split()) >= 25:
+                    result.append(" ".join(cur))
+                    cur = []
+            if cur:
+                result.append(" ".join(cur))
+        else:
+            result.append(s)
+    return [s for s in result if re.search(r"\w", s)]
+
+
+class Book:
+    """Sentences plus the structure needed to lay them out and navigate.
+
+    paragraphs: [(is_heading, first_sentence, end_sentence)]
+    chapters:   [(title, depth, first_sentence)]
+    voices:     {paragraph index: voice} - paragraphs read by another voice
+    """
+
+    def __init__(self, path, title):
+        self.path = path
+        self.title = title
+        self.sentences = []
+        self.headings = set()        # sentence indices that are headings
+        self.paragraphs = []
+        self.chapters = []
+        self.voices = {}
+
+    def add_para(self, text, heading=False):
+        text = " ".join(text.split())
+        if not text:
+            return
+        parts = [text] if heading else split_sentences(text)
+        if not parts or not re.search(r"\w", text):
+            return
+        lo = len(self.sentences)
+        self.sentences.extend(parts)
+        if heading:
+            self.headings.add(lo)
+        self.paragraphs.append((heading, lo, len(self.sentences)))
+
+    def spoken(self, i):
+        s = self.sentences[i]
+        # Headings have no full stop, so piper would run them into the
+        # first sentence of the chapter.
+        if i in self.headings and not re.search(r"[.!?:]$", s):
+            s += "."
+        return s
+
+    def paragraph_at(self, i):
+        """Index into self.paragraphs of the paragraph holding sentence i."""
+        return bisect.bisect_right([p[1] for p in self.paragraphs], i) - 1
+
+    def paragraph_text(self, n):
+        _h, lo, hi = self.paragraphs[n]
+        return " ".join(self.sentences[lo:hi])
+
+    def chapter_at(self, i):
+        """Index into self.chapters of the chapter containing sentence i."""
+        best = -1
+        for n, (_t, _d, start) in enumerate(self.chapters):
+            if start <= i:
+                best = n
+            else:
+                break
+        return best
+
+    def words_between(self, lo, hi):
+        return sum(len(s.split()) for s in self.sentences[lo:hi])
+
+
+def open_book(path):
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".epub":
+        book = parse_epub(path)
+    elif ext == ".pdf":
+        book = parse_pdf(path)
+    elif ext == ".docx":
+        book = parse_docx(path)
+    elif ext in (".md", ".markdown"):
+        book = parse_markdown(path)
+    else:
+        raise BookError("Only EPUB, PDF, DOCX and Markdown files can be opened.")
+    if not book.sentences:
+        raise BookError("No readable text was found in this file.")
+    # Chapters must be in reading order for chapter_at() and the sidebar.
+    book.chapters.sort(key=lambda c: c[2])
+    if not book.chapters:
+        book.chapters = [(book.title, 0, 0)]
+    return book
+
+
+# -- EPUB -------------------------------------------------------------------
+BLOCK = {"p", "div", "h1", "h2", "h3", "h4", "h5", "h6", "li", "blockquote",
+         "pre", "section", "article", "td", "th", "dd", "dt", "figcaption",
+         "tr", "header", "footer", "aside", "nav", "ul", "ol", "table",
+         "body", "hr", "figure", "caption"}
+SKIP = {"script", "style", "head", "title", "svg", "math", "rt", "rp"}
+XML = etree.XMLParser(recover=True, resolve_entities=False, no_network=True,
+                      huge_tree=True)
+
+
+def _local(tag):
+    return tag.rsplit("}", 1)[-1].lower() if isinstance(tag, str) else ""
+
+
+def _xml(data):
+    root = etree.fromstring(data, XML)
+    if root is None:
+        raise BookError("A file inside the EPUB could not be parsed.")
+    return root
+
+
+def _find_all(root, name):
+    return [e for e in root.iter() if _local(e.tag) == name]
+
+
+def parse_epub(path):
+    try:
+        z = zipfile.ZipFile(path)
+    except (OSError, zipfile.BadZipFile):
+        raise BookError("This EPUB is damaged or not really an EPUB.")
+    names = set(z.namelist())
+
+    def read(name):
+        if name not in names:
+            raise KeyError(name)
+        return z.read(name)
+
+    try:
+        container = _xml(read("META-INF/container.xml"))
+        opf_path = _find_all(container, "rootfile")[0].get("full-path")
+        opf = _xml(read(opf_path))
+    except (KeyError, IndexError):
+        raise BookError("This EPUB has no package file.")
+    base = posixpath.dirname(opf_path)
+
+    def resolve(rel, frm):
+        rel = unquote(rel.split("#", 1)[0])
+        return posixpath.normpath(posixpath.join(frm, rel)) if rel else ""
+
+    titles = [e.text for e in _find_all(opf, "title") if e.text]
+    title = titles[0].strip() if titles else os.path.splitext(
+        os.path.basename(path))[0]
+    book = Book(path, title)
+
+    manifest = {}
+    nav_path = ncx_path = None
+    for item in _find_all(opf, "item"):
+        href = resolve(item.get("href", ""), base)
+        manifest[item.get("id")] = href
+        if "nav" in (item.get("properties") or "").split():
+            nav_path = href
+        if item.get("media-type") == "application/x-dtbncx+xml":
+            ncx_path = href
+    spine_el = _find_all(opf, "spine")
+    toc_id = spine_el[0].get("toc") if spine_el else None
+    if toc_id in manifest:
+        ncx_path = manifest[toc_id]
+
+    anchors = {}       # (doc, id or None) -> sentence index
+    doc_titles = []    # fallback chapters: (title, first sentence)
+    for ref in _find_all(opf, "itemref"):
+        if ref.get("linear") == "no":
+            continue
+        doc = manifest.get(ref.get("idref"))
+        if not doc or doc not in names or doc == nav_path:
+            continue
+        anchors[(doc, None)] = len(book.sentences)
+        try:
+            root = _xml(read(doc))
+        except BookError:
+            continue
+        first_heading = []
+        _walk_xhtml(root, book, doc, anchors, first_heading)
+        heading = first_heading[0] if first_heading else None
+        if anchors[(doc, None)] < len(book.sentences):
+            doc_titles.append((heading or f"Section {len(doc_titles) + 1}",
+                               anchors[(doc, None)]))
+
+    def target(href, frm):
+        doc = resolve(href, frm)
+        frag = unquote(href.split("#", 1)[1]) if "#" in href else None
+        if (doc, frag) in anchors:
+            return anchors[(doc, frag)]
+        return anchors.get((doc, None))
+
+    total = len(book.sentences)
+    if nav_path and nav_path in names:
+        nav = _xml(read(nav_path))
+        navs = _find_all(nav, "nav")
+        tocs = [n for n in navs if any(
+            k.endswith("type") and "toc" in v for k, v in n.attrib.items())]
+        top = (tocs or navs or [None])[0]
+        if top is not None:
+            frm = posixpath.dirname(nav_path)
+
+            def walk_ol(ol, depth):
+                for li in ol:
+                    if _local(li.tag) != "li":
+                        continue
+                    link = next((e for e in li.iter() if _local(e.tag) in
+                                 ("a", "span")), None)
+                    if link is not None:
+                        label = " ".join("".join(link.itertext()).split())
+                        idx = target(link.get("href", ""), frm) \
+                            if link.get("href") else None
+                        if label and idx is not None and idx < total:
+                            book.chapters.append((label, depth, idx))
+                    for sub in li:
+                        if _local(sub.tag) == "ol":
+                            walk_ol(sub, depth + 1)
+
+            for ol in top:
+                if _local(ol.tag) == "ol":
+                    walk_ol(ol, 0)
+    if not book.chapters and ncx_path and ncx_path in names:
+        ncx = _xml(read(ncx_path))
+        frm = posixpath.dirname(ncx_path)
+
+        def walk_np(parent, depth):
+            for np_ in parent:
+                if _local(np_.tag) != "navpoint":
+                    continue
+                label = next((" ".join("".join(e.itertext()).split())
+                              for e in np_ if _local(e.tag) == "navlabel"), "")
+                src = next((e.get("src") for e in np_
+                            if _local(e.tag) == "content"), None)
+                idx = target(src, frm) if src else None
+                if label and idx is not None and idx < total:
+                    book.chapters.append((label, depth, idx))
+                walk_np(np_, depth + 1)
+
+        for nm in _find_all(ncx, "navmap"):
+            walk_np(nm, 0)
+    if not book.chapters:
+        book.chapters = [(t, 0, i) for t, i in doc_titles]
+    # Text-less entries (a cover) share a sentence with the next real entry.
+    # Keep the LAST label for each (sentence, depth), so the sidebar shows
+    # "Chapter 1" rather than "Cover" at that spot.
+    seen, uniq = set(), []
+    for label, depth, idx in reversed(book.chapters):
+        if (idx, depth) not in seen:
+            seen.add((idx, depth))
+            uniq.append((label, depth, idx))
+    book.chapters = list(reversed(uniq))
+    return book
+
+
+def _walk_xhtml(root, book, doc, anchors, first_heading):
+    bodies = _find_all(root, "body")
+    buf = []
+    state = {"heading": False}
+
+    def flush():
+        text = "".join(buf)
+        buf.clear()
+        if text.strip():
+            if state["heading"] and not first_heading:
+                first_heading.append(" ".join(text.split()))
+            book.add_para(text, heading=state["heading"])
+
+    def walk(el):
+        name = _local(el.tag)
+        if name in SKIP or not isinstance(el.tag, str):
+            return
+        el_id = el.get("id")
+        if el_id:
+            # Before a flush the buffer belongs to the paragraph this anchor
+            # sits in, so it lands on that paragraph's first sentence.
+            anchors[(doc, el_id)] = len(book.sentences)
+        block = name in BLOCK
+        is_heading = name in ("h1", "h2", "h3", "h4", "h5", "h6")
+        if block:
+            flush()
+            if is_heading:
+                state["heading"] = True
+        if name == "br":
+            buf.append(" ")
+        if el.text:
+            buf.append(el.text)
+        for child in el:
+            walk(child)
+            if child.tail:
+                buf.append(child.tail)
+        if block:
+            flush()
+            if is_heading:
+                state["heading"] = False
+
+    for body in bodies or [root]:
+        walk(body)
+    flush()
+
+
+# -- Markdown ---------------------------------------------------------------
+MD_ATX = re.compile(r"^ {0,3}(#{1,6})(?:[ \t]+(.*?))?(?:[ \t]+#+)?[ \t]*$")
+MD_SETEXT = re.compile(r"^ {0,3}(=+|-+)[ \t]*$")
+MD_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+MD_RULE = re.compile(r"^ {0,3}([-*_])([ \t]*\1){2,}[ \t]*$")
+MD_ITEM = re.compile(r"^[ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]+(?:\[[ xX]\][ \t]+)?")
+MD_QUOTE = re.compile(r"^[ \t]*(?:>[ \t]?)+")
+MD_LINKDEF = re.compile(r"^ {0,3}\[[^\]]+\]:[ \t]*\S")
+MD_TABLE_SEP = re.compile(r"^[ \t]*\|?[ \t]*:?-+:?[ \t]*(\|[ \t]*:?-+:?[ \t]*)*\|?[ \t]*$")
+MD_INLINE = [
+    (re.compile(r"!\[([^\]]*)\]\([^)]*\)"), ""),             # images
+    (re.compile(r"\[([^\]]+)\]\([^)]*\)"), r"\1"),           # [text](url)
+    (re.compile(r"\[([^\]]+)\]\[[^\]]*\]"), r"\1"),          # [text][ref]
+    (re.compile(r"<(?:https?|mailto):[^>]*>"), ""),          # autolinks
+    (re.compile(r"</?[A-Za-z][^>]*>"), ""),                  # inline HTML
+    (re.compile(r"`+([^`]*)`+"), r"\1"),
+    (re.compile(r"(\*\*|__)(?=\S)(.+?)(?<=\S)\1"), r"\2"),
+    (re.compile(r"\*(?=\S)(.+?)(?<=\S)\*"), r"\1"),
+    (re.compile(r"(?<!\w)_(?=\S)(.+?)(?<=\S)_(?!\w)"), r"\1"),
+    (re.compile(r"~~(.+?)~~"), r"\1"),
+    (re.compile(r"\\([\\`*_{}\[\]()#+\-.!|>~])"), r"\1"),
+]
+
+
+def _md_inline(text):
+    for pattern, repl in MD_INLINE:
+        text = pattern.sub(repl, text)
+    return html.unescape(text)
+
+
+def parse_markdown(path):
+    try:
+        with open(path, encoding="utf-8-sig", errors="replace") as fh:
+            text = fh.read()
+    except OSError:
+        raise BookError("Couldn't read this Markdown file.")
+    text = re.sub(r"<!--.*?-->", "", text, flags=re.S)
+    lines = text.splitlines()
+
+    title = None
+    if lines and lines[0].strip() == "---":
+        # YAML front matter: keep its title, don't read the rest aloud.
+        for n, ln in enumerate(lines[1:], 1):
+            if ln.strip() in ("---", "..."):
+                for meta in lines[1:n]:
+                    m = re.match(r"^title:\s*(.+?)\s*$", meta)
+                    if m:
+                        title = m.group(1).strip("\"'")
+                lines = lines[n + 1:]
+                break
+
+    book = Book(path, title or os.path.splitext(os.path.basename(path))[0])
+    headings = []       # (level, title, sentence)
+    buf = []
+    fence = None
+
+    def flush():
+        book.add_para(_md_inline(" ".join(buf)))
+        buf.clear()
+
+    def heading(level, raw):
+        flush()
+        label = " ".join(_md_inline(raw).split())
+        if label:
+            headings.append((level, label, len(book.sentences)))
+            book.add_para(label, heading=True)
+
+    for ln in lines:
+        if fence:
+            if ln.strip().startswith(fence):
+                fence = None
+            continue
+        m = MD_FENCE.match(ln)
+        if m:
+            flush()                     # code blocks aren't read aloud
+            fence = m.group(1)[0] * 3
+            continue
+        if not ln.strip() or MD_LINKDEF.match(ln):
+            flush()
+            continue
+        m = MD_ATX.match(ln)
+        if m:
+            heading(len(m.group(1)), m.group(2) or "")
+            continue
+        m = MD_SETEXT.match(ln)
+        if m and buf and not (len(buf) == 1 and MD_ITEM.match(buf[0])):
+            raw = " ".join(buf)
+            buf.clear()
+            heading(1 if m.group(1)[0] == "=" else 2, raw)
+            continue
+        if MD_RULE.match(ln):
+            flush()
+            continue
+        ln = MD_QUOTE.sub("", ln)
+        if "|" in ln and ln.strip().startswith("|") or MD_TABLE_SEP.match(ln):
+            flush()
+            if not MD_TABLE_SEP.match(ln):
+                cells = [c.strip() for c in ln.strip().strip("|").split("|")]
+                book.add_para(_md_inline(", ".join(c for c in cells if c)))
+            continue
+        if MD_ITEM.match(ln):
+            flush()
+            ln = MD_ITEM.sub("", ln)
+        buf.append(ln.strip())
+    flush()
+
+    if headings:
+        top = min(level for level, _t, _s in headings)
+        book.chapters = [(t, level - top, s) for level, t, s in headings]
+        h1 = [t for level, t, _s in headings if level == 1]
+        if not title and h1:
+            book.title = h1[0]
+    return book
+
+
+# -- DOCX -------------------------------------------------------------------
+W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+
+
+def parse_docx(path):
+    try:
+        z = zipfile.ZipFile(path)
+        document = _xml(z.read("word/document.xml"))
+    except zipfile.BadZipFile:
+        # Some exporters write Markdown or plain text under a .docx name.
+        try:
+            with open(path, "rb") as fh:
+                head = fh.read(4096)
+            head.decode("utf-8")
+        except (OSError, UnicodeDecodeError):
+            head = b"\0"
+        if head.strip() and b"\0" not in head:
+            return parse_markdown(path)
+        raise BookError("This DOCX is damaged or not really a Word document.")
+    except (OSError, KeyError, BookError):
+        raise BookError("This DOCX is damaged or not really a Word document.")
+    names = set(z.namelist())
+
+    # styleId -> (name, outline level, basedOn), for spotting headings.
+    styles = {}
+    if "word/styles.xml" in names:
+        for st in _xml(z.read("word/styles.xml")).iter(W + "style"):
+            name = st.find(W + "name")
+            lvl = st.find(f"{W}pPr/{W}outlineLvl")
+            based = st.find(W + "basedOn")
+            styles[st.get(W + "styleId")] = (
+                (name.get(W + "val") if name is not None else "").lower(),
+                lvl.get(W + "val") if lvl is not None else None,
+                based.get(W + "val") if based is not None else None)
+
+    def style_level(style_id):
+        """0-based heading level, "title", or None for body text."""
+        seen = set()
+        while style_id in styles and style_id not in seen:
+            seen.add(style_id)
+            name, lvl, based = styles[style_id]
+            if name == "title":
+                return "title"
+            m = re.match(r"heading ?(\d)$", name)
+            if m:
+                return int(m.group(1)) - 1
+            if lvl is not None and lvl.isdigit() and int(lvl) < 9:
+                return int(lvl)
+            style_id = based
+        return None
+
+    title = None
+    if "docProps/core.xml" in names:
+        for el in _xml(z.read("docProps/core.xml")).iter():
+            if _local(el.tag) == "title" and el.text and el.text.strip():
+                title = el.text.strip()
+    book = Book(path, title or os.path.splitext(os.path.basename(path))[0])
+    headings = []
+    titled = []
+
+    def para_text(p):
+        out = []
+
+        def walk(el):
+            name = _local(el.tag)
+            if el is not p and name in ("p", "txbxcontent", "fallback",
+                                        "footnotereference", "instrtext"):
+                return
+            if name == "t" and el.text:
+                out.append(el.text)
+            elif name in ("tab", "br", "cr"):
+                out.append(" ")
+            for child in el:
+                walk(child)
+
+        walk(p)
+        return "".join(out)
+
+    def walk(el):
+        for child in el:
+            name = _local(child.tag)
+            if name == "p":
+                pstyle = child.find(f"{W}pPr/{W}pStyle")
+                level = style_level(pstyle.get(W + "val")) \
+                    if pstyle is not None else None
+                own = child.find(f"{W}pPr/{W}outlineLvl")
+                if level is None and own is not None and \
+                        (own.get(W + "val") or "").isdigit() and \
+                        int(own.get(W + "val")) < 9:
+                    level = int(own.get(W + "val"))
+                text = " ".join(para_text(child).split())
+                if not text:
+                    continue
+                if level == "title":
+                    if not title and not titled:
+                        book.title = text
+                        titled.append(text)
+                    book.add_para(text, heading=True)
+                elif level is not None:
+                    headings.append((level, text, len(book.sentences)))
+                    book.add_para(text, heading=True)
+                else:
+                    book.add_para(text)
+            elif name == "tr":
+                cells = [" ".join(para_text(p).split())
+                         for tc in child.findall(W + "tc")
+                         for p in tc.iter(W + "p")]
+                book.add_para(", ".join(c for c in cells if c))
+            elif name not in ("sectpr", "fallback"):
+                walk(child)
+
+    body = document.find(W + "body")
+    walk(body if body is not None else document)
+    if headings:
+        top = min(level for level, _t, _s in headings)
+        book.chapters = [(t, level - top, s) for level, t, s in headings]
+    return book
+
+
+# -- PDF --------------------------------------------------------------------
+PAGE_NO = re.compile(r"^\W*(\d{1,4}|[ivxlcdm]{1,6})\W*$", re.I)
+SENT_END = re.compile(r"[.!?:\"')\]”’]$")
+
+
+def parse_pdf(path):
+    try:
+        doc = Poppler.Document.new_from_file(
+            GLib.filename_to_uri(os.path.abspath(path), None), None)
+    except Exception:
+        doc = None
+    if doc is None:
+        raise BookError("Couldn't open this PDF - it may be encrypted or "
+                        "damaged.")
+    title = (doc.props.title or "").strip() or os.path.splitext(
+        os.path.basename(path))[0]
+    book = Book(path, title)
+    n = doc.get_n_pages()
+    pages = []
+    for p in range(n):
+        text = doc.get_page(p).get_text() or ""
+        pages.append([ln.strip() for ln in text.splitlines()])
+    if not any(any(ln for ln in pg) for pg in pages):
+        raise BookError("This PDF has no text layer - it's probably scanned "
+                        "images, which can't be read aloud.")
+
+    outline = []    # (title, depth, page index)
+    try:
+        it = Poppler.IndexIter.new(doc)
+    except TypeError:       # no outline: the constructor returns NULL
+        it = None
+
+    def walk(it, depth):
+        while it is not None:
+            try:
+                action = it.get_action()
+                page = None
+                if action.type == Poppler.ActionType.GOTO_DEST:
+                    dest = action.goto_dest.dest
+                    if dest.type == Poppler.DestType.NAMED:
+                        dest = doc.find_dest(dest.named_dest)
+                    if dest is not None and dest.page_num >= 1:
+                        page = dest.page_num - 1
+                label = " ".join((action.any.title or "").split())
+                if label and page is not None and page < n:
+                    outline.append((label, depth, page))
+            except Exception:
+                pass
+            child = it.get_child()
+            if child is not None:
+                walk(child, depth + 1)
+            if not it.next():
+                break
+
+    walk(it, 0)
+    heading_titles = {}
+    for label, _d, page in outline:
+        heading_titles.setdefault(page, set()).add(label.casefold())
+
+    # Running headers and footers: the same first/last line (digits ignored)
+    # on a good share of pages is furniture, not prose.
+    def norm(ln):
+        return re.sub(r"\d+", "#", ln.casefold())
+
+    edge_counts = {}
+    for pg in pages:
+        lines = [ln for ln in pg if ln]
+        for ln in {*(lines[:1]), *(lines[-1:])}:
+            edge_counts[norm(ln)] = edge_counts.get(norm(ln), 0) + 1
+    furniture = {k for k, v in edge_counts.items()
+                 if n >= 4 and v >= max(3, n * 0.3)}
+
+    lengths = sorted(len(ln) for pg in pages for ln in pg if ln)
+    typical = lengths[int(len(lengths) * 0.9)] if lengths else 80
+
+    page_start = []
+    heading_at = {}     # (page, title) -> sentence of that heading
+    buf = []
+
+    def flush(heading=False):
+        if buf:
+            book.add_para(" ".join(buf), heading=heading)
+            buf.clear()
+
+    for p, pg in enumerate(pages):
+        lines = [ln for ln in pg if ln]
+        while lines and (PAGE_NO.match(lines[0]) or norm(lines[0]) in furniture):
+            lines.pop(0)
+        while lines and (PAGE_NO.match(lines[-1]) or norm(lines[-1]) in furniture):
+            lines.pop()
+        # A paragraph that ended at the bottom of the last page must not
+        # swallow this page's opening, or the page anchor lands a page early.
+        if buf and SENT_END.search(buf[-1]):
+            flush()
+        page_start.append(len(book.sentences) if not buf else None)
+        titles = heading_titles.get(p, set())
+        for ln in lines:
+            if ln.casefold() in titles:
+                flush()
+                buf.append(ln)
+                flush(heading=True)
+                heading_at.setdefault((p, ln.casefold()), len(book.sentences) - 1)
+                if page_start[p] is None:
+                    page_start[p] = len(book.sentences) - 1
+                continue
+            if buf and buf[-1].endswith("-") and len(buf[-1]) > 1 \
+                    and buf[-1][-2].isalpha() and ln[:1].islower():
+                buf[-1] = buf[-1][:-1] + ln        # re-join a hyphenated word
+            else:
+                buf.append(ln)
+            if SENT_END.search(ln) and len(ln) < typical * 0.8:
+                flush()
+        if page_start[p] is None:
+            # The page opened mid-paragraph: point at that paragraph.
+            page_start[p] = len(book.sentences)
+    flush()
+    total = len(book.sentences)
+    page_start = [min(s, max(total - 1, 0)) for s in page_start]
+
+    if outline:
+        book.chapters = [(t, d, heading_at.get((p, t.casefold()), page_start[p]))
+                         for t, d, p in outline]
+    else:
+        book.chapters = [(f"Page {p + 1}", 0, page_start[p]) for p in range(n)
+                         if any(pages[p])]
+    return book
+
+
+# -- playback engine --------------------------------------------------------
+WAV_INDEX = re.compile(r"/s(\d+)[^/]*\.wav$")
+
+
+def list_voices():
+    """Piper voices by .onnx name, then Kokoro's English ones as kokoro:<name>."""
+    try:
+        names = sorted(f[:-5] for f in os.listdir(VOICES) if f.endswith(".onnx"))
+    except OSError:
+        names = []
+    if os.path.exists(f"{KOKORO_DIR}/venv/bin/python") and \
+            os.path.exists(f"{KOKORO_DIR}/kokoro-v1.0.onnx"):
+        try:
+            with zipfile.ZipFile(f"{KOKORO_DIR}/voices-v1.0.bin") as z:
+                names += sorted(f"kokoro:{n[:-4]}" for n in z.namelist()
+                                if n.endswith(".npy") and n[:1] in "ab")
+        except (OSError, zipfile.BadZipFile):
+            pass
+    return names
+
+
+def default_voice(voices):
+    for name in (DEFAULT_VOICE, PIPER_DEFAULT_VOICE):
+        if name in voices:
+            return name
+    return voices[0] if voices else PIPER_DEFAULT_VOICE
+
+
+def voice_engine(voice):
+    """(engine name, command, process key) - Kokoro voices share one process."""
+    if voice.startswith("kokoro:"):
+        return "kokoro-tts", [KOKORO, "--json-input"], "kokoro"
+    return "piper", [PIPER, "-m", f"{VOICES}/{voice}.onnx", "--json-input"], voice
+
+
+class Engines:
+    """piper / kokoro-tts processes, one per voice model (Kokoro voices share
+    one), kept loaded so alternating paragraph voices don't reload a model."""
+
+    def __init__(self):
+        self.procs = {}             # key -> process, recent last
+        self.closed = False
+
+    def synth(self, voice, text, path):
+        """Render text to a WAV at path; False if the engine failed twice."""
+        _name, command, key = voice_engine(voice)
+        job = {"text": text, "output_file": path}
+        if key == "kokoro":
+            job["voice"] = voice.removeprefix("kokoro:")
+        for _attempt in range(2):
+            proc = None
+            try:
+                proc = self.procs.pop(key, None)
+                if proc is None or proc.poll() is not None:
+                    # The least recently used engine goes past TTS_KEEP.
+                    while len(self.procs) >= TTS_KEEP:
+                        stale = self.procs.pop(next(iter(self.procs)))
+                        stale.kill()
+                        stale.wait()
+                    proc = subprocess.Popen(
+                        command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                        stderr=subprocess.DEVNULL, text=True, bufsize=1)
+                self.procs[key] = proc
+                proc.stdin.write(json.dumps(job) + "\n")
+                proc.stdin.flush()
+                if proc.stdout.readline().strip() and os.path.getsize(path) > 0:
+                    return True
+            except (OSError, ValueError):
+                pass
+            if self.closed:
+                return False
+            if proc is not None:
+                proc.kill()
+                proc.wait()
+            self.procs.pop(key, None)
+        return False
+
+    def close(self):
+        """Kill every engine; safe to call from another thread mid-synth."""
+        self.closed = True
+        for proc in list(self.procs.values()):
+            proc.kill()
+
+
+class Player(GObject.Object):
+    """piper or kokoro-tts renders a window of sentences around the playhead;
+    mpv plays them. Each sentence is read by its paragraph's voice if the book
+    gives it one (book.voices), else by the book voice.
+
+    Every jump bumps `gen`. Work finished for an older generation is dropped
+    when it reaches the main loop, so a sentence that was mid-render when you
+    clicked elsewhere can never slip into the new queue.
+    """
+
+    __gsignals__ = {
+        "position": (GObject.SignalFlags.RUN_FIRST, None, (int,)),
+        "paused": (GObject.SignalFlags.RUN_FIRST, None, (bool,)),
+        "stopped": (GObject.SignalFlags.RUN_FIRST, None, ()),
+        "ended": (GObject.SignalFlags.RUN_FIRST, None, ()),
+        "error": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
+    }
+
+    def __init__(self):
+        super().__init__()
+        self.book = None
+        self.voice = DEFAULT_VOICE
+        self.speed = 1.0
+        self.pos = 0
+        self.is_paused = True
+        self.gen = 0
+        self.next_render = 0
+        self.rendered = {}          # idx -> wav path, complete files only
+        self.played_last = False
+        self.mpv = None
+        self.sock = None
+        self.watch = None
+        self.buf = b""
+        self.lock = threading.Lock()
+        self.cond = threading.Condition(self.lock)
+        self.thread = None
+        self.quit_thread = False
+        self.tts = Engines()
+
+    @property
+    def running(self):
+        return self.sock is not None
+
+    # -- lifecycle ---------------------------------------------------------
+    def start(self, book, idx, voice, speed):
+        if self.running and book is not self.book:
+            self.stop()
+        self.voice, self.speed = voice, speed
+        if not self.running:
+            name, command, _key = voice_engine(voice)
+            if not os.path.exists(command[0]):
+                self.emit("error", f"{name} not found at {command[0]}")
+                return
+            self.book = book
+            # Before the render thread starts, or it renders sentence 0 first.
+            self.pos = self.next_render = idx
+            self._setup()
+            if not self.running:
+                return
+        self.jump(idx)
+
+    def _setup(self):
+        # A read-aloud.sh session owns the same socket; end it first.
+        if os.path.exists(SOCK):
+            subprocess.run([READ_ALOUD, "--stop"], stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=10)
+        os.makedirs(RDIR, exist_ok=True)
+        for f in os.listdir(RDIR):
+            if f.endswith(".wav"):
+                os.unlink(os.path.join(RDIR, f))
+        self.rendered.clear()
+        # The tile maps a WAV's sN index to this list.
+        tmp = f"{RDIR}/sentences.json.tmp"
+        with open(tmp, "w") as fh:
+            json.dump(self.book.sentences, fh)
+        os.replace(tmp, f"{RDIR}/sentences.json")
+
+        self.mpv = subprocess.Popen(
+            ["mpv", "--no-video", "--really-quiet", "--idle=yes",
+             "--keep-open=no", "--gapless-audio=yes", "--no-terminal",
+             f"--input-ipc-server={SOCK}", f"--speed={self.speed}"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, start_new_session=True)
+        s = None
+        for _ in range(100):
+            if self.mpv.poll() is not None:
+                break
+            try:
+                s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                s.connect(SOCK)
+                break
+            except OSError:
+                s.close()
+                s = None
+                time.sleep(0.03)
+        if s is None:
+            self.emit("error", "mpv did not start.")
+            self._teardown()
+            return
+        self.sock = s
+        self.buf = b""
+        self.watch = GLib.io_add_watch(
+            s.fileno(), GLib.PRIORITY_DEFAULT,
+            GLib.IOCondition.IN | GLib.IOCondition.HUP | GLib.IOCondition.ERR,
+            self._on_data)
+        for i, prop in enumerate(("path", "pause", "idle-active"), start=1):
+            self._send(["observe_property", i, prop])
+        self.quit_thread = False
+        self.thread = threading.Thread(target=self._render_loop, daemon=True)
+        self.thread.start()
+
+    def stop(self):
+        """End playback and clean up. Emits nothing - the caller asked."""
+        if self.sock:
+            self._send(["quit"])
+        self._teardown()
+
+    def _teardown(self):
+        if self.watch:
+            GLib.source_remove(self.watch)
+            self.watch = None
+        if self.sock:
+            self.sock.close()
+            self.sock = None
+        if self.mpv:
+            try:
+                self.mpv.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                self.mpv.kill()
+            self.mpv = None
+        with self.cond:
+            self.quit_thread = True
+            self.gen += 1
+            self.cond.notify_all()
+        self.tts.close()
+        if self.thread:
+            self.thread.join(timeout=2)
+            self.thread = None
+        self.tts = Engines()
+        self.rendered.clear()
+        try:
+            for f in os.listdir(RDIR):
+                os.unlink(os.path.join(RDIR, f))
+            os.rmdir(RDIR)
+        except OSError:
+            pass
+        self.is_paused = True
+
+    # -- controls ------------------------------------------------------------
+    def jump(self, idx, play=True):
+        if not self.running:
+            return
+        idx = max(0, min(idx, len(self.book.sentences) - 1))
+        with self.cond:
+            self.gen += 1
+            self.pos = idx
+            self.next_render = idx
+            self.played_last = False
+            self.cond.notify_all()
+        self._send(["stop"])
+        if play:
+            self._send(["set_property", "pause", False])
+        self.emit("position", idx)
+
+    def toggle(self):
+        self._send(["cycle", "pause"])
+
+    def set_paused(self, paused):
+        self._send(["set_property", "pause", paused])
+
+    def set_speed(self, speed):
+        self.speed = speed
+        self._send(["set_property", "speed", speed])
+
+    def voice_for(self, idx):
+        book = self.book
+        if book is not None and book.voices:
+            return book.voices.get(book.paragraph_at(idx), self.voice)
+        return self.voice
+
+    def set_voice(self, voice):
+        if voice == self.voice:
+            return
+        with self.cond:
+            self.voice = voice
+            old = list(self.rendered.values())
+            self.rendered.clear()
+        if self.running:
+            self.jump(self.pos, play=not self.is_paused)
+        # After the jump has cleared mpv's queue, so nothing still wants them.
+        for path in old:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+    def voices_changed(self, paragraphs):
+        """book.voices changed for these paragraphs: re-render what's queued."""
+        if not self.running:
+            return
+        spans = [self.book.paragraphs[n][1:] for n in paragraphs]
+        with self.cond:
+            hit = [i for i in self.rendered if any(lo <= i < hi for lo, hi in spans)]
+            old = [self.rendered.pop(i) for i in hit]
+            queued = any(lo < self.next_render and hi > self.pos for lo, hi in spans)
+        if queued:
+            self.jump(self.pos, play=not self.is_paused)
+        for path in old:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+    # -- mpv IPC -------------------------------------------------------------
+    def _send(self, command):
+        if not self.sock:
+            return
+        try:
+            self.sock.sendall((json.dumps({"command": command}) + "\n").encode())
+        except OSError:
+            pass
+
+    def _on_data(self, _fd, cond):
+        data = b""
+        if cond & GLib.IOCondition.IN:
+            try:
+                data = self.sock.recv(65536)
+            except OSError:
+                data = b""
+        if not data:
+            # mpv went away: Super+Shift+P, read-aloud.sh taking over, or a
+            # crash. Clean up our side and let the window know.
+            self.watch = None
+            self._teardown()
+            self.emit("stopped")
+            return False
+        self.buf += data
+        while b"\n" in self.buf:
+            line, self.buf = self.buf.split(b"\n", 1)
+            try:
+                msg = json.loads(line)
+            except ValueError:
+                continue
+            if msg.get("event") == "property-change":
+                self._on_property(msg.get("name"), msg.get("data"))
+        return True
+
+    def _on_property(self, name, value):
+        if name == "path" and isinstance(value, str):
+            m = WAV_INDEX.search(value)
+            if not m:
+                return
+            idx = int(m.group(1))
+            with self.cond:
+                self.pos = idx
+                self.played_last = idx >= len(self.book.sentences) - 1
+                self.cond.notify_all()
+            self._reap()
+            self.emit("position", idx)
+        elif name == "pause":
+            self.is_paused = bool(value)
+            self.emit("paused", self.is_paused)
+        elif name == "idle-active" and value and self.played_last:
+            self.emit("ended")
+
+    # -- rendering -----------------------------------------------------------
+    def _wav(self, idx, voice):
+        key = hashlib.sha1(voice.encode()).hexdigest()[:6]
+        return f"{RDIR}/s{idx:05d}-{key}.wav"
+
+    def _render_loop(self):
+        total = len(self.book.sentences)
+        while True:
+            with self.cond:
+                while not self.quit_thread and self.next_render >= min(
+                        total, self.pos + AHEAD + 1):
+                    self.cond.wait()
+                if self.quit_thread:
+                    return
+                gen, idx = self.gen, self.next_render
+                voice = self.voice_for(idx)
+                self.next_render += 1
+                path = self._wav(idx, voice)
+                done = self.rendered.get(idx) == path and os.path.exists(path)
+            if not done:
+                if not self._synth(voice, self.book.spoken(idx), path):
+                    continue
+                with self.cond:
+                    if voice == self.voice_for(idx):
+                        self.rendered[idx] = path
+            GLib.idle_add(self._queue, gen, path)
+
+    def _synth(self, voice, text, path):
+        if self.tts.synth(voice, text, path):
+            return True
+        if not self.quit_thread:
+            GLib.idle_add(self.emit, "error",
+                          f"{voice_engine(voice)[0]} failed to render a sentence.")
+        return False
+
+    def _queue(self, gen, path):
+        if gen == self.gen and self.running:
+            self._send(["loadfile", path, "append-play"])
+        return False
+
+    def _reap(self):
+        # WAVs live in tmpfs (RAM): drop the ones well outside the window.
+        with self.cond:
+            lo, hi = self.pos - KEEP_BEHIND, self.next_render + AHEAD
+            stale = [i for i in self.rendered if i < lo or i > hi]
+            paths = [self.rendered.pop(i) for i in stale]
+        for p in paths:
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
+
+
+# -- audiobook export -------------------------------------------------------
+EXPORT_RATE = 24000         # Kokoro's rate; piper's 22.05 kHz is resampled up
+PARAGRAPH_GAP = 0.35        # seconds of silence after a paragraph
+HEADING_GAP = 1.0           # ... and after a heading
+EXPORT_FORMATS = {          # suffix -> ffmpeg output options
+    ".m4b": ["-c:a", "aac", "-b:a", "64k", "-f", "ipod"],
+    ".m4a": ["-c:a", "aac", "-b:a", "64k", "-f", "ipod"],
+    ".mp3": ["-c:a", "libmp3lame", "-b:a", "64k", "-f", "mp3"],
+}
+
+
+def _ffmeta(text):
+    return re.sub(r"([=;#\\\n])", r"\\\1", text)
+
+
+class Exporter(GObject.Object):
+    """Renders a whole book, paragraph voices included, into one audio file
+    with chapter markers: an .m4b audiobook (or .m4a / .mp3) for a phone.
+
+    Sentences stream as PCM into ffmpeg, so only one WAV exists at a time.
+    Chapter times are only known once everything is rendered, so a second
+    ffmpeg pass copies the audio and adds them. The file appears at its
+    real name only when it is complete.
+    """
+
+    __gsignals__ = {
+        "progress": (GObject.SignalFlags.RUN_FIRST, None, (float, float)),  # done, eta s
+        "finished": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
+        "failed": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
+    }
+
+    def __init__(self, book, voice, out):
+        super().__init__()
+        self.book, self.voice, self.out = book, voice, out
+        self.voices = dict(book.voices)     # the book may change while we work
+        self.cancelled = False
+        self.engines = Engines()
+        self.ffmpeg = None
+        self.thread = None
+
+    @property
+    def running(self):
+        return self.thread is not None and self.thread.is_alive()
+
+    def start(self):
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+
+    def cancel(self):
+        self.cancelled = True
+        self.engines.close()
+        if self.ffmpeg and self.ffmpeg.poll() is None:
+            self.ffmpeg.kill()
+
+    def _run(self):
+        cache = os.path.join(os.environ.get("XDG_CACHE_HOME", f"{HOME}/.cache"),
+                             "tts-reader")
+        os.makedirs(cache, exist_ok=True)
+        work = tempfile.mkdtemp(prefix="export-", dir=cache)
+        try:
+            error = self._render(work)
+        except Exception as e:              # report, never leave a thread dead silent
+            error = f"Export failed ({e})."
+        finally:
+            self.engines.close()
+            for f in os.listdir(work):
+                os.unlink(os.path.join(work, f))
+            os.rmdir(work)
+        if self.cancelled:
+            return
+        if error:
+            GLib.idle_add(self.emit, "failed", error)
+        else:
+            GLib.idle_add(self.emit, "finished", self.out)
+
+    def _render(self, work):
+        import numpy as np      # only exporting needs it
+
+        book = self.book
+        suffix = os.path.splitext(self.out)[1].lower()
+        options = EXPORT_FORMATS[suffix]
+        audio = f"{work}/audio{suffix}"
+        self.ffmpeg = subprocess.Popen(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+             "-f", "s16le", "-ar", str(EXPORT_RATE), "-ac", "1", "-i", "pipe:0",
+             *options, audio],
+            stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+
+        para_of = [0] * len(book.sentences)
+        ends = {}                           # last sentence of a paragraph -> gap
+        for n, (heading, lo, hi) in enumerate(book.paragraphs):
+            para_of[lo:hi] = [n] * (hi - lo)
+            ends[hi - 1] = HEADING_GAP if heading else PARAGRAPH_GAP
+        chapter_at = {start: title for title, _d, start in book.chapters}
+        chapters = []                       # (sample, title)
+        samples, total, began = 0, len(book.sentences), time.monotonic()
+        wav = f"{work}/sentence.wav"
+
+        for i in range(total):
+            if self.cancelled:
+                return None
+            if i in chapter_at:
+                chapters.append((samples, chapter_at[i]))
+            voice = self.voices.get(para_of[i], self.voice)
+            if not self.engines.synth(voice, book.spoken(i), wav):
+                if self.cancelled:
+                    return None
+                return (f"{voice_engine(voice)[0]} couldn't render sentence {i + 1}: "
+                        f"“{book.sentences[i][:50]}”")
+            with wave.open(wav, "rb") as w:
+                rate, width = w.getframerate(), w.getsampwidth()
+                pcm = np.frombuffer(w.readframes(w.getnframes()),
+                                    {1: np.uint8, 2: np.int16}[width])
+                if w.getnchannels() > 1:
+                    pcm = pcm.reshape(-1, w.getnchannels())[:, 0]
+            if width == 1:
+                pcm = ((pcm.astype(np.int16) - 128) << 8).astype(np.int16)
+            if rate != EXPORT_RATE and len(pcm):
+                n = int(len(pcm) * EXPORT_RATE / rate)
+                pcm = np.interp(np.arange(n) * (rate / EXPORT_RATE),
+                                np.arange(len(pcm)), pcm).astype(np.int16)
+            gap = np.zeros(int(EXPORT_RATE * ends.get(i, 0)), np.int16)
+            try:
+                self.ffmpeg.stdin.write(pcm.tobytes() + gap.tobytes())
+            except (BrokenPipeError, OSError):
+                if self.cancelled:
+                    return None
+                return "ffmpeg stopped: " + self.ffmpeg.stderr.read().decode(errors="replace")[-200:]
+            samples += len(pcm) + len(gap)
+            if i % 4 == 0 or i == total - 1:
+                spent = time.monotonic() - began
+                eta = spent / (i + 1) * (total - i - 1)
+                GLib.idle_add(self.emit, "progress", (i + 1) / total, eta)
+
+        self.ffmpeg.stdin.close()
+        err = self.ffmpeg.stderr.read().decode(errors="replace")
+        if self.ffmpeg.wait() != 0:
+            return None if self.cancelled else f"ffmpeg failed: {err[-200:]}"
+
+        meta = [";FFMETADATA1", f"title={_ffmeta(book.title)}",
+                f"album={_ffmeta(book.title)}", "genre=Audiobook"]
+        for n, (start, title) in enumerate(chapters):
+            end = chapters[n + 1][0] if n + 1 < len(chapters) else samples
+            if end > start:
+                meta += ["[CHAPTER]", f"TIMEBASE=1/{EXPORT_RATE}", f"START={start}",
+                         f"END={end}", f"title={_ffmeta(title)}"]
+        with open(f"{work}/chapters.txt", "w", encoding="utf-8") as fh:
+            fh.write("\n".join(meta) + "\n")
+        partial = f"{self.out}.part"
+        self.ffmpeg = subprocess.Popen(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", audio,
+             "-i", f"{work}/chapters.txt", "-map", "0:a", "-map_metadata", "1",
+             "-map_chapters", "1", "-c", "copy",
+             *(["-id3v2_version", "3"] if suffix == ".mp3" else []),
+             "-f", options[-1], partial],
+            stdin=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        _out, err = self.ffmpeg.communicate()
+        if self.ffmpeg.returncode != 0:
+            try:
+                os.unlink(partial)
+            except OSError:
+                pass
+            return None if self.cancelled else f"ffmpeg failed: {err.decode(errors='replace')[-200:]}"
+        os.replace(partial, self.out)
+        return None
+
+
+# -- library ----------------------------------------------------------------
+class Library:
+    """Reading positions, recent books and settings, in one JSON file."""
+
+    def __init__(self):
+        try:
+            with open(LIBRARY) as fh:
+                self.data = json.load(fh)
+        except (OSError, ValueError):
+            self.data = {}
+        self.data.setdefault("books", {})
+
+    def save(self):
+        os.makedirs(DATA, exist_ok=True)
+        tmp = LIBRARY + ".tmp"
+        with open(tmp, "w") as fh:
+            json.dump(self.data, fh, indent=1)
+        os.replace(tmp, LIBRARY)
+
+    def book(self, path):
+        return self.data["books"].get(path, {})
+
+    def remember(self, path, **fields):
+        entry = self.data["books"].setdefault(path, {})
+        entry.update(fields)
+
+    def recent(self, limit=8):
+        books = [(p, b) for p, b in self.data["books"].items()
+                 if os.path.exists(p)]
+        books.sort(key=lambda pb: pb[1].get("opened", 0), reverse=True)
+        return books[:limit]
+
+    def setting(self, key, default):
+        return self.data.get(key, default)
+
+    def set_setting(self, key, value):
+        self.data[key] = value
+
+
+# -- window -----------------------------------------------------------------
+CSS = """
+.reader-text { background: transparent; }
+.player-bar { padding: 6px 18px 12px; }
+.play-button { min-width: 52px; min-height: 52px; }
+.progress-label { font-feature-settings: "tnum"; }
+.follow-button { margin-bottom: 18px; }
+"""
+SPEEDS = ["0.75", "0.9", "1.0", "1.1", "1.25", "1.5", "1.75", "2.0"]
+SLEEPS = [("off", "Off"), ("15", "15 minutes"), ("30", "30 minutes"),
+          ("45", "45 minutes"), ("60", "1 hour"), ("chapter", "End of chapter")]
+
+
+def voice_label(name):
+    if name.startswith("kokoro:"):
+        # kokoro:bm_george - accent letter, gender letter, speaker.
+        accent, _, speaker = name[7:].partition("_")
+        region = {"a": "en_US", "b": "en_GB"}.get(accent[:1], accent)
+        return f"{speaker.replace('_', ' ').title()} ({region}, Kokoro)"
+    parts = name.split("-")
+    if len(parts) >= 2:
+        return f"{parts[1].replace('_', ' ').title()} ({parts[0]})"
+    return name
+
+
+def time_left_label(minutes):
+    minutes = int(round(minutes))
+    if minutes < 1:
+        return "under a minute left"
+    h, m = divmod(minutes, 60)
+    return f"{h} h {m} min left" if h else f"{m} min left"
+
+
+def accent_rgba():
+    """The rice's accent, from the matugen GTK4 colours (like tts-tile.py)."""
+    rgba = Gdk.RGBA()
+    path = os.path.join(os.environ.get("XDG_CONFIG_HOME", f"{HOME}/.config"),
+                        "gtk-4.0", "colors.css")
+    try:
+        with open(path) as fh:
+            found = dict(re.findall(r"@define-color\s+(\w+)\s+([^;]+);",
+                                    fh.read()))
+        for key in ("accent_bg_color", "accent_color"):
+            if key in found and rgba.parse(found[key].strip()):
+                return rgba
+    except OSError:
+        pass
+    return Adw.StyleManager.get_default().get_accent_color_rgba()
+
+
+# Paragraph tints: one colour per voice used in the book, in name order.
+TINTS = ["#7dcfff", "#bb9af7", "#ff9e64", "#9ece6a", "#f7768e", "#e0af68"]
+
+
+def voice_tints(voices):
+    """{voice: soft colour} for every voice in a book's paragraph voices."""
+    tints = {}
+    for n, voice in enumerate(sorted(set(voices.values()))):
+        rgba = Gdk.RGBA()
+        rgba.parse(TINTS[n % len(TINTS)])
+        rgba.alpha = 0.16
+        tints[voice] = rgba
+    return tints
+
+
+class SentenceView(Gtk.TextView):
+    """The book's text; click a sentence to read from it, right-click a
+    paragraph (or a selection) to give it its own voice."""
+
+    __gsignals__ = {
+        "sentence-clicked": (GObject.SignalFlags.RUN_FIRST, None, (int,)),
+        # paragraph indices, x, y
+        "paragraph-menu": (GObject.SignalFlags.RUN_FIRST, None,
+                           (GObject.TYPE_PYOBJECT, float, float)),
+    }
+    MAX_WIDTH = 720
+
+    def __init__(self):
+        super().__init__(editable=False, cursor_visible=False, focusable=False,
+                         wrap_mode=Gtk.WrapMode.WORD_CHAR, top_margin=36,
+                         bottom_margin=160, pixels_below_lines=14)
+        self.add_css_class("reader-text")
+        buf = self.get_buffer()
+        self.tag_current = buf.create_tag("current")
+        self.tag_heading = buf.create_tag(
+            "heading", weight=Pango.Weight.BOLD, scale=1.4,
+            pixels_above_lines=30, pixels_below_lines=20)
+        self.mark = buf.create_mark("current", buf.get_start_iter(), True)
+        self.starts, self.ends = [], []
+        self.current = None
+        self.side = 0
+        self.refresh_accent()
+        click = Gtk.GestureClick(button=Gdk.BUTTON_PRIMARY)
+        click.connect("released", self._released)
+        self.add_controller(click)
+        # Capture phase, so the text view's own copy menu never opens.
+        menu = Gtk.GestureClick(button=Gdk.BUTTON_SECONDARY,
+                                propagation_phase=Gtk.PropagationPhase.CAPTURE)
+        menu.connect("pressed", self._menu_pressed)
+        self.add_controller(menu)
+        self.tint_tags = {}            # voice -> tag
+        self.voice_names = {}          # paragraph index -> voice label, for tooltips
+        self.set_has_tooltip(True)
+        self.connect("query-tooltip", self._tooltip)
+
+    def refresh_accent(self):
+        rgba = accent_rgba()
+        rgba.alpha = 0.28
+        self.tag_current.props.background_rgba = rgba
+
+    def do_size_allocate(self, width, height, baseline):
+        Gtk.TextView.do_size_allocate(self, width, height, baseline)
+        side = max(28, (width - self.MAX_WIDTH) // 2)
+        if side != self.side:
+            # Changing margins inside an allocation re-queues one; defer it.
+            self.side = side
+            GLib.idle_add(self._apply_side, side)
+
+    def _apply_side(self, side):
+        self.set_left_margin(side)
+        self.set_right_margin(side)
+        return False
+
+    def load(self, book):
+        pieces, starts, ends, heads = [], [], [], []
+        off = 0
+        for heading, lo, hi in book.paragraphs:
+            if pieces:
+                pieces.append("\n")
+                off += 1
+            para_start = off
+            for i in range(lo, hi):
+                if i > lo:
+                    pieces.append(" ")
+                    off += 1
+                s = book.sentences[i]
+                starts.append(off)
+                pieces.append(s)
+                off += len(s)
+                ends.append(off)
+            if heading:
+                heads.append((para_start, off))
+        buf = self.get_buffer()
+        buf.set_text("".join(pieces))
+        for a, b in heads:
+            buf.apply_tag(self.tag_heading, buf.get_iter_at_offset(a),
+                          buf.get_iter_at_offset(b))
+        self.starts, self.ends = starts, ends
+        self.current = None
+
+    def highlight(self, i, scroll):
+        if not self.starts:
+            return
+        buf = self.get_buffer()
+        if self.current is not None and self.current < len(self.starts):
+            buf.remove_tag(self.tag_current,
+                           buf.get_iter_at_offset(self.starts[self.current]),
+                           buf.get_iter_at_offset(self.ends[self.current]))
+        i = max(0, min(i, len(self.starts) - 1))
+        a = buf.get_iter_at_offset(self.starts[i])
+        buf.apply_tag(self.tag_current, a, buf.get_iter_at_offset(self.ends[i]))
+        buf.move_mark(self.mark, a)
+        self.current = i
+        if scroll:
+            self.scroll_to_mark(self.mark, 0.0, True, 0.0, 0.3)
+
+    def _line_at(self, x, y):
+        bx, by = self.window_to_buffer_coords(Gtk.TextWindowType.WIDGET,
+                                              int(x), int(y))
+        ok, it = self.get_iter_at_location(bx, by)
+        return it.get_line() if ok else None
+
+    def _menu_pressed(self, gesture, _n_press, x, y):
+        if not self.starts:
+            return
+        gesture.set_state(Gtk.EventSequenceState.CLAIMED)
+        line = self._line_at(x, y)
+        if line is None:
+            return
+        # Each paragraph is one buffer line. A selection under the pointer
+        # covers every paragraph it touches.
+        buf = self.get_buffer()
+        bounds = buf.get_selection_bounds()
+        if bounds and bounds[0].get_line() <= line <= bounds[1].get_line():
+            paras = list(range(bounds[0].get_line(), bounds[1].get_line() + 1))
+        else:
+            paras = [line]
+        self.emit("paragraph-menu", paras, x, y)
+
+    def set_voice_tints(self, voices, label):
+        """Tint every paragraph with a voice of its own; `label` names voices."""
+        buf = self.get_buffer()
+        start, end = buf.get_bounds()
+        for tag in self.tint_tags.values():
+            buf.remove_tag(tag, start, end)
+        self.voice_names = {}
+        tints = voice_tints(voices)
+        for n, voice in voices.items():
+            tag = self.tint_tags.get(voice)
+            if tag is None:
+                tag = buf.create_tag(None)
+                tag.set_priority(0)          # under the reading highlight
+                self.tint_tags[voice] = tag
+            # Colours follow the set of voices, so they can change as it does.
+            tag.props.paragraph_background_rgba = tints[voice]
+            ok, a = buf.get_iter_at_line(n)
+            if not ok:
+                continue
+            b = a.copy()
+            b.forward_to_line_end()
+            buf.apply_tag(tag, a, b)
+            self.voice_names[n] = label(voice)
+
+    def _tooltip(self, _view, x, y, _keyboard, tooltip):
+        if not self.voice_names:
+            return False
+        line = self._line_at(x, y)
+        if line not in self.voice_names:
+            return False
+        tooltip.set_text(f"Read by {self.voice_names[line]}")
+        return True
+
+    def _released(self, _gesture, n_press, x, y):
+        buf = self.get_buffer()
+        if n_press != 1 or buf.get_has_selection() or not self.starts:
+            return
+        bx, by = self.window_to_buffer_coords(Gtk.TextWindowType.WIDGET,
+                                              int(x), int(y))
+        ok, it = self.get_iter_at_location(bx, by)
+        if not ok:
+            return
+        off = it.get_offset()
+        k = bisect.bisect_right(self.starts, off) - 1
+        if k >= 0 and off <= self.ends[k]:
+            self.emit("sentence-clicked", k)
+
+
+class ReaderWindow(Adw.ApplicationWindow):
+    def __init__(self, app):
+        super().__init__(application=app, title="TTS Reader")
+        self.set_default_size(1180, 820)
+        self.app, self.lib, self.player = app, app.library, app.player
+        self.book = None
+        self.pos = 0
+        self.follow = True
+        self.syncing = False             # programmatic widget updates
+        self.scale_source = self.save_source = None
+        self.sleep_source = self.sleep_deadline = self.sleep_chapter = None
+        self.chapter_rows = []
+        self.current_chapter = -1
+        self.all_voices = list_voices() or [PIPER_DEFAULT_VOICE]
+        self.voices = []                 # dropdown order: favourites first
+        self.exporter = None
+
+        self.toasts = Adw.ToastOverlay()
+        self.toolbar = Adw.ToolbarView()
+        self.toasts.set_child(self.toolbar)
+        self.set_content(self.toasts)
+        self._build_header()
+        self._build_pages()
+        self._build_player_bar()
+        self._build_actions()
+        self._connect_player()
+
+        drop = Gtk.DropTarget.new(Gio.File, Gdk.DragAction.COPY)
+        drop.connect("drop", self._on_drop)
+        self.add_controller(drop)
+
+        bp = Adw.Breakpoint.new(Adw.BreakpointCondition.parse("max-width: 820sp"))
+        bp.add_setter(self.split, "collapsed", True)
+        self.add_breakpoint(bp)
+        self.connect("close-request", self._on_close)
+        self._fill_recent(self.recent_box)
+        self._show_page("empty")
+
+    # -- construction --------------------------------------------------------
+    def _build_header(self):
+        header = Adw.HeaderBar()
+        self.sidebar_button = Gtk.ToggleButton(
+            icon_name="sidebar-show-symbolic", tooltip_text="Chapters (F9)",
+            active=True, sensitive=False)
+        header.pack_start(self.sidebar_button)
+        header.pack_start(Gtk.Button(icon_name="document-open-symbolic",
+                                     tooltip_text="Open a book (Ctrl+O)",
+                                     action_name="win.open"))
+        self.recent_popover_box = Gtk.ListBox(
+            selection_mode=Gtk.SelectionMode.NONE, width_request=340)
+        popover = Gtk.Popover(child=self.recent_popover_box)
+        popover.connect("show", lambda _p: self._fill_recent(
+            self.recent_popover_box))
+        header.pack_start(Gtk.MenuButton(
+            icon_name="document-open-recent-symbolic",
+            tooltip_text="Recent books", popover=popover))
+        self.export_button = Gtk.Button(
+            icon_name="document-save-symbolic", action_name="win.export",
+            tooltip_text="Save as an audiobook for your phone (Ctrl+E)")
+        header.pack_end(self.export_button)
+        self.title_widget = Adw.WindowTitle(title="TTS Reader", subtitle="")
+        header.set_title_widget(self.title_widget)
+        menu = Gio.Menu()
+        menu.append("Larger Text", "win.zoom-in")
+        menu.append("Smaller Text", "win.zoom-out")
+        menu.append("Reset Text Size", "win.zoom-reset")
+        section = Gio.Menu()
+        section.append("Save as Audiobook…", "win.export")
+        section.append("Close Book", "win.close-book")
+        menu.append_section(None, section)
+        header.pack_end(Gtk.MenuButton(icon_name="open-menu-symbolic",
+                                       menu_model=menu, tooltip_text="Menu"))
+        self.toolbar.add_top_bar(header)
+        self.export_banner = Adw.Banner(button_label="Cancel")
+        self.export_banner.connect("button-clicked", lambda _b: self.cancel_export())
+        self.toolbar.add_top_bar(self.export_banner)
+
+    def _build_pages(self):
+        self.stack = Gtk.Stack(
+            transition_type=Gtk.StackTransitionType.CROSSFADE)
+        self.toolbar.set_content(self.stack)
+
+        # Nothing open.
+        self.recent_box = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE,
+                                      css_classes=["boxed-list"])
+        self.recent_heading = Gtk.Label(label="Recent", xalign=0,
+                                        css_classes=["heading"], margin_top=18)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        box.append(Gtk.Button(label="Open Book…", action_name="win.open",
+                              halign=Gtk.Align.CENTER,
+                              css_classes=["pill", "suggested-action"]))
+        box.append(self.recent_heading)
+        box.append(self.recent_box)
+        self.stack.add_named(Adw.StatusPage(
+            icon_name="accessories-dictionary-symbolic", title="Open a Book",
+            description="EPUB, PDF, DOCX or Markdown, or drop a file onto this window",
+            child=Adw.Clamp(maximum_size=460, child=box)), "empty")
+
+        # Parsing.
+        loading = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12,
+                          valign=Gtk.Align.CENTER, halign=Gtk.Align.CENTER)
+        loading.append(Adw.Spinner(width_request=48, height_request=48))
+        loading.append(Gtk.Label(label="Opening…", css_classes=["dim-label"]))
+        self.stack.add_named(loading, "loading")
+
+        # Reading.
+        self.view = SentenceView()
+        self.view.connect("sentence-clicked", lambda _v, i: self.jump_to(i))
+        self.view.connect("paragraph-menu", self._paragraph_menu)
+        self.scroller = Gtk.ScrolledWindow(child=self.view, hexpand=True,
+                                           vexpand=True)
+        wheel = Gtk.EventControllerScroll(
+            flags=Gtk.EventControllerScrollFlags.VERTICAL)
+        wheel.connect("scroll", self._on_user_scroll)
+        self.scroller.add_controller(wheel)
+        grab = Gtk.GestureClick()
+        grab.connect("pressed", lambda *_: self._stop_follow())
+        self.scroller.get_vscrollbar().add_controller(grab)
+        self.follow_button = Gtk.Button(
+            label="Back to Current Sentence", halign=Gtk.Align.CENTER,
+            valign=Gtk.Align.END, visible=False,
+            css_classes=["pill", "suggested-action", "follow-button"])
+        self.follow_button.connect("clicked", lambda _b: self._resume_follow())
+        overlay = Gtk.Overlay(child=self.scroller)
+        overlay.add_overlay(self.follow_button)
+
+        self.chapter_list = Gtk.ListBox(css_classes=["navigation-sidebar"])
+        self.chapter_list.connect("row-activated", self._on_chapter_activated)
+        side = Gtk.ScrolledWindow(child=self.chapter_list,
+                                  hscrollbar_policy=Gtk.PolicyType.NEVER)
+        self.split = Adw.OverlaySplitView(
+            sidebar=side, content=overlay, min_sidebar_width=250,
+            max_sidebar_width=340, sidebar_width_fraction=0.26)
+        self.sidebar_button.bind_property(
+            "active", self.split, "show-sidebar",
+            GObject.BindingFlags.BIDIRECTIONAL | GObject.BindingFlags.SYNC_CREATE)
+        self.stack.add_named(self.split, "reader")
+
+    def _build_player_bar(self):
+        bar = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2,
+                      css_classes=["player-bar"])
+        top = Gtk.Box(spacing=12)
+        self.percent_label = Gtk.Label(
+            xalign=0, width_chars=5,
+            css_classes=["caption", "dim-label", "progress-label"])
+        self.scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 1, 1)
+        self.scale.set_draw_value(False)
+        self.scale.set_hexpand(True)
+        self.scale.connect("change-value", self._on_scale)
+        self.left_label = Gtk.Label(
+            xalign=1, width_chars=18,
+            css_classes=["caption", "dim-label", "progress-label"])
+        for w in (self.percent_label, self.scale, self.left_label):
+            top.append(w)
+
+        transport = Gtk.Box(spacing=6, halign=Gtk.Align.CENTER)
+
+        def button(icon, tip, cb):
+            b = Gtk.Button(icon_name=icon, tooltip_text=tip,
+                           valign=Gtk.Align.CENTER,
+                           css_classes=["flat", "circular"])
+            b.connect("clicked", lambda _b: cb())
+            transport.append(b)
+
+        button("media-skip-backward-symbolic", "Previous chapter (Ctrl+Left)",
+               lambda: self.step_chapter(-1))
+        button("media-seek-backward-symbolic", "Previous sentence (Left)",
+               lambda: self.step_sentence(-1))
+        self.play_button = Gtk.Button(
+            icon_name="media-playback-start-symbolic",
+            tooltip_text="Play / pause (Space)", valign=Gtk.Align.CENTER,
+            css_classes=["circular", "suggested-action", "play-button"])
+        self.play_button.connect("clicked", lambda _b: self.toggle_play())
+        transport.append(self.play_button)
+        button("media-seek-forward-symbolic", "Next sentence (Right)",
+               lambda: self.step_sentence(1))
+        button("media-skip-forward-symbolic", "Next chapter (Ctrl+Right)",
+               lambda: self.step_chapter(1))
+
+        sleep_menu = Gio.Menu()
+        for key, label in SLEEPS:
+            sleep_menu.append(label, f"win.sleep::{key}")
+        self.sleep_content = Adw.ButtonContent(icon_name="alarm-symbolic",
+                                               label="Sleep")
+        sleep_button = Gtk.MenuButton(child=self.sleep_content,
+                                      menu_model=sleep_menu,
+                                      tooltip_text="Sleep timer",
+                                      css_classes=["flat"])
+
+        speed_menu = Gio.Menu()
+        for s in SPEEDS:
+            speed_menu.append(f"{s}×", f"win.speed::{s}")
+        self.speed_button = Gtk.MenuButton(
+            label=f"{self.lib.setting('speed', '1.0')}×", menu_model=speed_menu,
+            tooltip_text="Reading speed", css_classes=["flat"])
+        self.voice_model = Gtk.StringList()
+        self.voice_drop = Gtk.DropDown(model=self.voice_model,
+                                       tooltip_text="Voice")
+        self.favourite_button = Gtk.Button(valign=Gtk.Align.CENTER,
+                                           css_classes=["flat", "circular"])
+        self.favourite_button.connect("clicked", lambda _b: self.toggle_favourite())
+        self._fill_voices(self.lib.setting("voice", default_voice(self.all_voices)))
+        self.voice_drop.connect("notify::selected", self._on_voice)
+        end = Gtk.Box(spacing=6)
+        end.append(self.speed_button)
+        end.append(self.favourite_button)
+        end.append(self.voice_drop)
+
+        bar.append(top)
+        bar.append(Gtk.CenterBox(start_widget=sleep_button,
+                                 center_widget=transport, end_widget=end))
+        self.toolbar.add_bottom_bar(bar)
+
+    def _build_actions(self):
+        self.para_targets = []
+        para_voice = Gio.SimpleAction.new_stateful(
+            "para-voice", GLib.VariantType.new("s"), GLib.Variant("s", ""))
+        para_voice.connect("activate", lambda a, v: self.set_paragraph_voice(
+            self.para_targets, v.get_string()))
+        self.add_action(para_voice)
+        clear = Gio.SimpleAction.new("para-voices-clear", None)
+        clear.connect("activate", lambda *_: self.set_paragraph_voice(
+            list(self.book.voices) if self.book else [], ""))
+        self.add_action(clear)
+        def add(name, cb, state=None):
+            if state is None:
+                action = Gio.SimpleAction.new(name, None)
+                action.connect("activate", lambda *_: cb())
+            else:
+                action = Gio.SimpleAction.new_stateful(
+                    name, GLib.VariantType.new("s"), GLib.Variant("s", state))
+                action.connect("change-state", cb)
+            self.add_action(action)
+            return action
+
+        add("open", self.choose_file)
+        add("close-book", self.close_book)
+        self.export_action = add("export", self.choose_export)
+        self.export_action.set_enabled(False)
+        add("toggle-sidebar", lambda: self.sidebar_button.set_active(
+            not self.sidebar_button.get_active()))
+        add("zoom-in", lambda: self.app.set_text_size(self.app.text_size + 1))
+        add("zoom-out", lambda: self.app.set_text_size(self.app.text_size - 1))
+        add("zoom-reset", lambda: self.app.set_text_size(14))
+        add("speed", self._on_speed, state=self.lib.setting("speed", "1.0"))
+        add("sleep", self._on_sleep, state="off")
+
+        keys = Gtk.ShortcutController(
+            propagation_phase=Gtk.PropagationPhase.CAPTURE)
+
+        def key(trigger, cb):
+            def run(*_):
+                if self.book is None or self.stack.get_visible_child_name() != "reader":
+                    return False
+                cb()
+                return True
+            keys.add_shortcut(Gtk.Shortcut(
+                trigger=Gtk.ShortcutTrigger.parse_string(trigger),
+                action=Gtk.CallbackAction.new(run)))
+
+        key("space", self.toggle_play)
+        key("Left", lambda: self.step_sentence(-1))
+        key("Right", lambda: self.step_sentence(1))
+        key("<Control>Left", lambda: self.step_chapter(-1))
+        key("<Control>Right", lambda: self.step_chapter(1))
+        self.add_controller(keys)
+
+    def _connect_player(self):
+        p = self.player
+        self.handlers = [
+            p.connect("position", self._on_position),
+            p.connect("paused", self._on_paused),
+            p.connect("stopped", self._on_stopped),
+            p.connect("ended", self._on_ended),
+            p.connect("error", lambda _p, msg: self.toast(msg)),
+        ]
+
+    # -- pages & books -------------------------------------------------------
+    def _show_page(self, name):
+        self.stack.set_visible_child_name(name)
+        self.toolbar.set_reveal_bottom_bars(name == "reader")
+        self.sidebar_button.set_sensitive(name == "reader")
+        self.export_action.set_enabled(name == "reader" and self.exporter is None)
+        self.export_button.set_visible(name == "reader")
+
+    def toast(self, text):
+        self.toasts.add_toast(Adw.Toast(title=GLib.markup_escape_text(text),
+                                        timeout=4))
+
+    def _fill_recent(self, listbox):
+        while (row := listbox.get_row_at_index(0)) is not None:
+            listbox.remove(row)
+        recent = [(p, b) for p, b in self.lib.recent()
+                  if not self.book or p != self.book.path]
+        if listbox is self.recent_box:
+            self.recent_heading.set_visible(bool(recent))
+            listbox.set_visible(bool(recent))
+        if not recent:
+            listbox.append(Gtk.Label(label="No other recent books",
+                                     css_classes=["dim-label"],
+                                     margin_top=12, margin_bottom=12))
+            return
+        for path, entry in recent:
+            total = entry.get("total") or 0
+            pct = int(100 * entry.get("pos", 0) / total) if total else 0
+            row = Adw.ActionRow(title=GLib.markup_escape_text(
+                entry.get("title") or os.path.basename(path)),
+                subtitle=GLib.markup_escape_text(
+                    f"{pct}% · {os.path.basename(path)}"),
+                activatable=True)
+            row.add_suffix(Gtk.Image(icon_name="go-next-symbolic"))
+            row.connect("activated", lambda _r, p=path: self._open_recent(p))
+            listbox.append(row)
+
+    def _open_recent(self, path):
+        for popover in (self.recent_popover_box.get_ancestor(Gtk.Popover),):
+            if popover:
+                popover.popdown()
+        self.load_book(path)
+
+    def _on_drop(self, _target, gfile, _x, _y):
+        path = gfile.get_path()
+        if not path:
+            return False
+        self.load_book(path)
+        return True
+
+    def choose_file(self):
+        books = Gtk.FileFilter(name="Books (EPUB, PDF, DOCX, Markdown)")
+        for suffix in ("epub", "pdf", "docx", "md", "markdown"):
+            books.add_suffix(suffix)
+        filters = Gio.ListStore.new(Gtk.FileFilter)
+        filters.append(books)
+        dialog = Gtk.FileDialog(title="Open a Book", filters=filters,
+                                default_filter=books)
+        last = self.lib.setting("last_dir", None)
+        if last and os.path.isdir(last):
+            dialog.set_initial_folder(Gio.File.new_for_path(last))
+
+        def done(dlg, result):
+            try:
+                gfile = dlg.open_finish(result)
+            except GLib.Error:
+                return                       # cancelled
+            if gfile and gfile.get_path():
+                self.load_book(gfile.get_path())
+
+        dialog.open(self, None, done)
+
+    def load_book(self, path):
+        path = os.path.abspath(path)
+        previous = self.stack.get_visible_child_name()
+        self._show_page("loading")
+
+        def work():
+            try:
+                book, err = open_book(path), None
+            except BookError as e:
+                book, err = None, str(e)
+            except Exception as e:           # a malformed file, not a bug
+                book, err = None, f"Couldn't read this file ({e})."
+            GLib.idle_add(self._book_loaded, path, book, err, previous)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _book_loaded(self, path, book, err, previous):
+        if err:
+            self._show_page(previous if previous != "loading" else "empty")
+            self.toast(err)
+            return False
+        self.save_position()
+        if self.player.running:
+            self.player.stop()
+        self._on_paused(None, True)
+        self._cancel_sleep()
+        self.book = book
+        entry = self.lib.book(path)
+        total = len(book.sentences)
+        self.pos = min(entry.get("pos", 0), total - 1)
+        self.lib.remember(path, title=book.title, total=total,
+                          opened=time.time(), pos=self.pos)
+        self.lib.set_setting("last_dir", os.path.dirname(path))
+        self.lib.save()
+
+        self.view.load(book)
+        self._restore_paragraph_voices(book, entry)
+        while (row := self.chapter_list.get_row_at_index(0)) is not None:
+            self.chapter_list.remove(row)
+        self.chapter_rows = []
+        for n, (title, depth, _start) in enumerate(book.chapters):
+            label = Gtk.Label(label=title, xalign=0, tooltip_text=title,
+                              ellipsize=Pango.EllipsizeMode.END,
+                              margin_start=4 + 16 * min(depth, 4))
+            if depth == 0 and any(d > 0 for _t, d, _s in book.chapters):
+                label.add_css_class("heading")
+            row = Gtk.ListBoxRow(child=label)
+            row.chapter = n
+            self.chapter_list.append(row)
+            self.chapter_rows.append(row)
+        self.current_chapter = -1
+        self.syncing = True
+        self.scale.set_range(0, max(1, total - 1))
+        self.syncing = False
+        self.title_widget.set_title(book.title)
+        self._show_page("reader")
+        self.follow = True
+        self.follow_button.set_visible(False)
+        self._update_position(self.pos)
+        # The view has no layout yet; scroll once it has been measured.
+        GLib.timeout_add(150, lambda: (self.view.highlight(self.pos, True), False)[1])
+        return False
+
+    def close_book(self):
+        if self.book is None:
+            return
+        self.save_position()
+        self.player.stop()
+        self._cancel_sleep()
+        self.book = None
+        self._on_paused(None, True)
+        self.title_widget.set_title("TTS Reader")
+        self.title_widget.set_subtitle("")
+        self._fill_recent(self.recent_box)
+        self._show_page("empty")
+
+    def save_position(self):
+        if self.save_source:
+            GLib.source_remove(self.save_source)
+            self.save_source = None
+        if self.book:
+            self.lib.remember(self.book.path, pos=self.pos)
+            self.lib.save()
+        return False
+
+    # -- transport -----------------------------------------------------------
+    def _voice(self):
+        return self.voices[self.voice_drop.get_selected()]
+
+    def _speed(self):
+        return float(self.lib.setting("speed", "1.0"))
+
+    def toggle_play(self):
+        if self.book is None:
+            return
+        if self.player.running:
+            self.player.toggle()
+        else:
+            self.player.start(self.book, self.pos, self._voice(), self._speed())
+
+    def jump_to(self, i):
+        if self.book is None:
+            return
+        i = max(0, min(i, len(self.book.sentences) - 1))
+        self.follow = True
+        self.follow_button.set_visible(False)
+        if self.player.running:
+            self.player.jump(i)
+        else:
+            self.player.start(self.book, i, self._voice(), self._speed())
+
+    def step_sentence(self, delta):
+        self.jump_to(self.pos + delta)
+
+    def step_chapter(self, delta):
+        if not self.book:
+            return
+        starts = [c[2] for c in self.book.chapters]
+        cur = self.book.chapter_at(self.pos)
+        if delta < 0:
+            # Like a CD player: back goes to the start of this chapter first,
+            # unless we are already a few sentences into it.
+            if cur >= 0 and self.pos - starts[cur] > 2:
+                target = starts[cur]
+            else:
+                target = starts[max(cur - 1, 0)] if cur > 0 else 0
+        else:
+            later = [s for s in starts if s > self.pos]
+            if not later:
+                return
+            target = later[0]
+        self.jump_to(target)
+
+    def _on_chapter_activated(self, _list, row):
+        if self.syncing:
+            return
+        self.jump_to(self.book.chapters[row.chapter][2])
+        if self.split.get_collapsed():
+            self.split.set_show_sidebar(False)
+
+    def _on_scale(self, _scale, _scroll, value):
+        if self.syncing or not self.book:
+            return False
+        i = int(round(value))
+        self._update_labels(i)
+        if self.scale_source:
+            GLib.source_remove(self.scale_source)
+        # Dragging fires continuously; only jump once it settles.
+        self.scale_source = GLib.timeout_add(
+            250, lambda: (setattr(self, "scale_source", None), self.jump_to(i),
+                          False)[2])
+        return False
+
+    def _on_speed(self, action, value):
+        action.set_state(value)
+        speed = value.get_string()
+        self.speed_button.set_label(f"{speed}×")
+        self.lib.set_setting("speed", speed)
+        self.lib.save()
+        self.player.set_speed(float(speed))
+        self._update_labels(self.pos)
+
+    def _favourites(self):
+        return self.lib.setting("favourite_voices", [])
+
+    def _fill_voices(self, selected):
+        """Favourites first, starred, then every other voice in name order."""
+        favourites = [v for v in self._favourites() if v in self.all_voices]
+        self.voices = favourites + [v for v in self.all_voices
+                                    if v not in favourites]
+        if selected not in self.voices:
+            selected = default_voice(self.all_voices)
+        self.syncing = True
+        self.voice_model.splice(0, self.voice_model.get_n_items(), [
+            f"★  {voice_label(v)}" if v in favourites else voice_label(v)
+            for v in self.voices])
+        self.voice_drop.set_selected(self.voices.index(selected))
+        self.syncing = False
+        self._update_favourite_button()
+
+    def _update_favourite_button(self):
+        starred = self._voice() in self._favourites()
+        self.favourite_button.set_icon_name(
+            "starred-symbolic" if starred else "non-starred-symbolic")
+        self.favourite_button.set_tooltip_text(
+            "Remove from favourite voices" if starred
+            else "Add to favourite voices")
+        if starred:
+            self.favourite_button.add_css_class("accent")
+        else:
+            self.favourite_button.remove_css_class("accent")
+
+    def toggle_favourite(self):
+        voice = self._voice()
+        favourites = list(self._favourites())
+        if voice in favourites:
+            favourites.remove(voice)
+            message = f"Removed {voice_label(voice)} from favourites"
+        else:
+            favourites.append(voice)
+            message = f"Added {voice_label(voice)} to favourites"
+        self.lib.set_setting("favourite_voices", favourites)
+        self.lib.save()
+        self._fill_voices(voice)
+        self.toast(message)
+
+    # -- paragraph voices ----------------------------------------------------
+    def _restore_paragraph_voices(self, book, entry):
+        """Saved as {paragraph: {voice, text}}; the text catches an edited file."""
+        missing = 0
+        for key, saved in (entry.get("voices") or {}).items():
+            n = int(key) if key.isdigit() else -1
+            if not 0 <= n < len(book.paragraphs) or \
+                    not book.paragraph_text(n).startswith(saved.get("text", "")):
+                continue
+            if saved.get("voice") in self.all_voices:
+                book.voices[n] = saved["voice"]
+            else:
+                missing += 1
+        self.view.set_voice_tints(book.voices, voice_label)
+        if missing:
+            self.toast(f"{missing} paragraph voice{'s' if missing > 1 else ''} "
+                       "aren't installed - using the book voice there")
+
+    def _paragraph_menu(self, _view, paras, x, y):
+        if not self.book:
+            return
+        self.para_targets = paras
+        chosen = {self.book.voices.get(n, "") for n in paras}
+        self.lookup_action("para-voice").set_state(
+            GLib.Variant("s", chosen.pop() if len(chosen) == 1 else "mixed"))
+        favourites = [v for v in self._favourites() if v in self.all_voices]
+        others = [v for v in self.all_voices if v not in favourites]
+
+        menu = Gio.Menu()
+        pick = Gio.Menu()
+        pick.append(f"Book voice ({voice_label(self._voice())})", "win.para-voice::")
+        for v in favourites:
+            pick.append(f"★  {voice_label(v)}", f"win.para-voice::{v}")
+        rest = Gio.Menu()
+        for v in others:
+            rest.append(voice_label(v), f"win.para-voice::{v}")
+        if others:
+            pick.append_submenu("Other voices" if favourites else "Voices", rest)
+        title = "Voice for this paragraph" if len(paras) == 1 \
+            else f"Voice for {len(paras)} paragraphs"
+        menu.append_section(title, pick)
+        if self.book.voices:
+            tools = Gio.Menu()
+            tools.append("Clear all paragraph voices", "win.para-voices-clear")
+            menu.append_section(None, tools)
+
+        popover = Gtk.PopoverMenu.new_from_model(menu)
+        popover.set_parent(self.view)
+        popover.set_has_arrow(False)
+        rect = Gdk.Rectangle()
+        rect.x, rect.y, rect.width, rect.height = int(x), int(y), 1, 1
+        popover.set_pointing_to(rect)
+        popover.connect("closed", lambda p: GLib.idle_add(p.unparent))
+        popover.popup()
+
+    def set_paragraph_voice(self, paras, voice):
+        """Give paragraphs their own voice, or "" to hand them back to the book voice."""
+        book = self.book
+        if not book or not paras:
+            return
+        for n in paras:
+            if voice:
+                book.voices[n] = voice
+            else:
+                book.voices.pop(n, None)
+        self.lib.remember(book.path, voices={
+            str(n): {"voice": v, "text": book.paragraph_text(n)[:60]}
+            for n, v in sorted(book.voices.items())})
+        self.lib.save()
+        self.view.set_voice_tints(book.voices, voice_label)
+        self.player.voices_changed(paras)
+        count = "this paragraph" if len(paras) == 1 else f"{len(paras)} paragraphs"
+        self.toast(f"{voice_label(voice)} reads {count}" if voice
+                   else f"The book voice reads {count}")
+
+    def _on_voice(self, *_):
+        if self.syncing:
+            return
+        self._update_favourite_button()
+        voice = self._voice()
+        self.lib.set_setting("voice", voice)
+        self.lib.save()
+        self.player.set_voice(voice)
+
+    # -- sleep timer ---------------------------------------------------------
+    def _on_sleep(self, action, value):
+        action.set_state(value)
+        self._cancel_sleep(reset_action=False)
+        key = value.get_string()
+        if key == "chapter" and self.book:
+            self.sleep_chapter = self.book.chapter_at(self.pos)
+            self.sleep_content.set_label("End of chapter")
+        elif key.isdigit():
+            self.sleep_deadline = time.monotonic() + int(key) * 60
+            self.sleep_source = GLib.timeout_add_seconds(5, self._sleep_tick)
+            self._sleep_tick()
+
+    def _sleep_tick(self):
+        left = self.sleep_deadline - time.monotonic()
+        if left <= 0:
+            self.player.set_paused(True)
+            self.toast("Sleep timer: paused")
+            self._cancel_sleep()
+            return False
+        self.sleep_content.set_label(f"{int(left // 60) + 1} min")
+        return True
+
+    def _cancel_sleep(self, reset_action=True):
+        if self.sleep_source:
+            GLib.source_remove(self.sleep_source)
+        self.sleep_source = self.sleep_deadline = self.sleep_chapter = None
+        self.sleep_content.set_label("Sleep")
+        if reset_action:
+            self.lookup_action("sleep").set_state(GLib.Variant("s", "off"))
+
+    # -- player events -------------------------------------------------------
+    def _on_position(self, _player, i):
+        if not self.book:
+            return
+        self.pos = i
+        self.view.highlight(i, self.follow)
+        self._update_position(i)
+        if self.sleep_chapter is not None and \
+                self.book.chapter_at(i) != self.sleep_chapter:
+            self.player.set_paused(True)
+            self.toast("Sleep timer: paused at the end of the chapter")
+            self._cancel_sleep()
+        if not self.save_source:
+            self.save_source = GLib.timeout_add_seconds(3, self.save_position)
+
+    def _update_position(self, i):
+        self.view.highlight(i, self.follow)
+        ch = self.book.chapter_at(i)
+        if ch != self.current_chapter:
+            self.current_chapter = ch
+            self.syncing = True
+            if 0 <= ch < len(self.chapter_rows):
+                row = self.chapter_rows[ch]
+                self.chapter_list.select_row(row)
+                # Keep the highlighted chapter in view in the sidebar.
+                ok, rect = row.compute_bounds(self.chapter_list)
+                adj = self.chapter_list.get_ancestor(
+                    Gtk.ScrolledWindow).get_vadjustment()
+                if ok and not (adj.get_value() <= rect.get_y() <=
+                               adj.get_value() + adj.get_page_size() - 40):
+                    adj.set_value(max(0, rect.get_y() - 80))
+            else:
+                self.chapter_list.unselect_all()
+            self.syncing = False
+            self.title_widget.set_subtitle(
+                self.book.chapters[ch][0] if ch >= 0 else "")
+        if not self.scale_source:
+            self.syncing = True
+            self.scale.set_value(i)
+            self.syncing = False
+        self._update_labels(i)
+
+    def _update_labels(self, i):
+        total = len(self.book.sentences)
+        self.percent_label.set_label(f"{int(100 * i / max(total - 1, 1))}%")
+        words = self.book.words_between(i, total)
+        self.left_label.set_label(time_left_label(words / (WPM * self._speed())))
+
+    def _on_paused(self, _player, paused):
+        self.play_button.set_icon_name(
+            "media-playback-start-symbolic" if paused
+            else "media-playback-pause-symbolic")
+
+    def _on_stopped(self, _player):
+        self._on_paused(None, True)
+        self.save_position()
+        if not self.get_visible() and not self.exporter:
+            self.app.quit()
+
+    def _on_ended(self, _player):
+        self.player.set_paused(True)
+        self.save_position()
+        self.toast("Finished the book")
+        if not self.get_visible():
+            self.player.stop()
+            if not self.exporter:
+                self.app.quit()
+
+    # -- audiobook export ----------------------------------------------------
+    def choose_export(self):
+        if self.book is None or self.exporter is not None:
+            return
+        filters = Gio.ListStore.new(Gtk.FileFilter)
+        for name, suffix in (("Audiobook with chapters (M4B)", "m4b"),
+                             ("MP3", "mp3")):
+            f = Gtk.FileFilter(name=name)
+            f.add_suffix(suffix)
+            filters.append(f)
+        stem = re.sub(r'[/\\:*?"<>|]+', " ", self.book.title).strip() or "Audiobook"
+        dialog = Gtk.FileDialog(title="Save as Audiobook", filters=filters,
+                                initial_name=f"{stem}.m4b")
+        folder = self.lib.setting("export_dir", None)
+        if not (folder and os.path.isdir(folder)):
+            folder = os.path.dirname(self.book.path)
+        dialog.set_initial_folder(Gio.File.new_for_path(folder))
+        book, voice = self.book, self._voice()
+
+        def done(dlg, result):
+            try:
+                gfile = dlg.save_finish(result)
+            except GLib.Error:
+                return                       # cancelled
+            path = gfile.get_path() if gfile else None
+            if path:
+                self.start_export(book, voice, path)
+
+        dialog.save(self, None, done)
+
+    def start_export(self, book, voice, path):
+        if os.path.splitext(path)[1].lower() not in EXPORT_FORMATS:
+            path += ".m4b"
+        self.lib.set_setting("export_dir", os.path.dirname(path))
+        self.lib.save()
+        self.exporter = Exporter(book, voice, path)
+        self.exporter.connect("progress", self._on_export_progress)
+        self.exporter.connect("finished", self._on_export_finished)
+        self.exporter.connect("failed", self._on_export_failed)
+        self.export_action.set_enabled(False)
+        self.export_banner.set_title(
+            f"Saving “{GLib.markup_escape_text(os.path.basename(path))}”…")
+        self.export_banner.set_revealed(True)
+        self.exporter.start()
+
+    def cancel_export(self):
+        if self.exporter:
+            self.exporter.cancel()
+            self._export_ended()
+            self.toast("Audiobook export cancelled")
+
+    def _on_export_progress(self, exporter, done, eta):
+        if exporter is not self.exporter:
+            return
+        name = GLib.markup_escape_text(os.path.basename(exporter.out))
+        left = time_left_label(eta / 60) if done > 0.01 else "estimating time"
+        self.export_banner.set_title(f"Saving “{name}” · {int(done * 100)}% · {left}")
+
+    def _on_export_finished(self, exporter, path):
+        if exporter is not self.exporter:
+            return
+        self._export_ended()
+        toast = Adw.Toast(title=GLib.markup_escape_text(
+            f"Saved {os.path.basename(path)}"), button_label="Open Folder", timeout=0)
+        toast.connect("button-clicked", lambda _t: Gio.AppInfo.launch_default_for_uri(
+            Gio.File.new_for_path(os.path.dirname(path)).get_uri(), None))
+        self.toasts.add_toast(toast)
+        self._notify_export(f"Saved {os.path.basename(path)}")
+
+    def _on_export_failed(self, exporter, message):
+        if exporter is not self.exporter:
+            return
+        self._export_ended()
+        self.toast(message)
+        self._notify_export(message)
+
+    def _export_ended(self):
+        self.exporter = None
+        self.export_banner.set_revealed(False)
+        self.export_action.set_enabled(self.stack.get_visible_child_name() == "reader")
+        if not self.get_visible() and not self.player.running:
+            self.app.quit()
+
+    def _notify_export(self, text):
+        if self.get_visible() and self.is_active():
+            return
+        note = Gio.Notification.new("Audiobook export")
+        note.set_body(text)
+        self.app.send_notification("export", note)
+
+    # -- scrolling -----------------------------------------------------------
+    def _on_user_scroll(self, *_):
+        self._stop_follow()
+        return False
+
+    def _stop_follow(self):
+        if self.book and self.follow:
+            self.follow = False
+            self.follow_button.set_visible(True)
+
+    def _resume_follow(self):
+        self.follow = True
+        self.follow_button.set_visible(False)
+        self.view.highlight(self.pos, True)
+
+    # -- closing -------------------------------------------------------------
+    def _on_close(self, _win):
+        self.save_position()
+        if self.player.running and not self.player.is_paused:
+            # Keep reading in the background; the tile takes over.
+            self.set_visible(False)
+            self.app.show_tile()
+            return True
+        self.player.stop()
+        if self.exporter:
+            # Keep exporting in the background; a notification says when it's done.
+            self.set_visible(False)
+            return True
+        return False
+
+
+class ReaderApp(Adw.Application):
+    def __init__(self):
+        super().__init__(application_id=APP_ID,
+                         flags=Gio.ApplicationFlags.HANDLES_OPEN)
+        self.library = Library()
+        self.player = Player()
+        self.window = None
+        self.tile = None
+        self.text_size = self.library.setting("text_size", 14)
+        self.size_css = Gtk.CssProvider()
+        self.colors_monitor = None
+
+    def do_startup(self):
+        Adw.Application.do_startup(self)
+        display = Gdk.Display.get_default()
+        base = Gtk.CssProvider()
+        base.load_from_string(CSS)
+        Gtk.StyleContext.add_provider_for_display(
+            display, base, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        Gtk.StyleContext.add_provider_for_display(
+            display, self.size_css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 1)
+        self.set_text_size(self.text_size)
+        self.set_accels_for_action("win.open", ["<Control>o"])
+        self.set_accels_for_action("win.close-book", ["<Control>w"])
+        self.set_accels_for_action("win.export", ["<Control>e"])
+        self.set_accels_for_action("win.toggle-sidebar", ["F9"])
+        self.set_accels_for_action("win.zoom-in", ["<Control>plus", "<Control>equal"])
+        self.set_accels_for_action("win.zoom-out", ["<Control>minus"])
+        self.set_accels_for_action("win.zoom-reset", ["<Control>0"])
+        # matugen rewrites the colours on every wallpaper change.
+        colors = Gio.File.new_for_path(os.path.join(
+            os.environ.get("XDG_CONFIG_HOME", f"{HOME}/.config"),
+            "gtk-4.0", "colors.css"))
+        try:
+            self.colors_monitor = colors.monitor_file(Gio.FileMonitorFlags.NONE, None)
+            self.colors_monitor.connect("changed", lambda *_: self.window and
+                                        self.window.view.refresh_accent())
+        except GLib.Error:
+            pass
+
+    def set_text_size(self, size):
+        self.text_size = max(9, min(size, 32))
+        self.size_css.load_from_string(
+            f".reader-text {{ font-size: {self.text_size}pt; }}")
+        self.library.set_setting("text_size", self.text_size)
+        self.library.save()
+
+    def do_activate(self):
+        if self.window is None:
+            self.window = ReaderWindow(self)
+        self.hide_tile()
+        self.window.present()
+
+    def do_open(self, files, _n, _hint):
+        self.do_activate()
+        path = files[0].get_path() if files else None
+        if path:
+            self.window.load_book(path)
+
+    def show_tile(self):
+        if self.player.running and os.access(TILE, os.X_OK) \
+                and os.environ.get("WAYLAND_DISPLAY"):
+            self.hide_tile()
+            self.tile = subprocess.Popen(
+                [TILE, RDIR, SOCK], stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, start_new_session=True)
+
+    def hide_tile(self):
+        if self.tile and self.tile.poll() is None:
+            self.tile.terminate()
+            try:
+                self.tile.wait(timeout=1)    # reap it, or it lingers as a zombie
+            except subprocess.TimeoutExpired:
+                self.tile.kill()
+        self.tile = None
+
+    def do_shutdown(self):
+        if self.window:
+            self.window.save_position()
+        self.player.stop()
+        if self.window and self.window.exporter:
+            self.window.exporter.cancel()
+        self.hide_tile()
+        Adw.Application.do_shutdown(self)
+
+
+def main():
+    return ReaderApp().run(sys.argv)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

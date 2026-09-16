@@ -103,7 +103,7 @@ Scope {
                 left: true
                 right: true
             }
-            exclusionMode: ExclusionMode.Normal
+            exclusionMode: ExclusionMode.Ignore       // over the bar, so clicking it closes
             color: "transparent"
             WlrLayershell.layer: WlrLayer.Overlay
             WlrLayershell.namespace: "rice-capture"
@@ -118,7 +118,7 @@ Scope {
                 id: panel
                 anchors.top: parent.top
                 anchors.right: parent.right
-                anchors.topMargin: 8
+                anchors.topMargin: Theme.barHeight + 8
                 anchors.rightMargin: 10
                 width: 420
                 height: content.implicitHeight + 36

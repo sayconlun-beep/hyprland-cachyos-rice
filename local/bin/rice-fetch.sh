@@ -20,7 +20,11 @@
 set -uo pipefail
 
 CFG="$HOME/.config/fastfetch"
-LOGO_GIF="${LOGO_GIF:-$CFG/logo.gif}"
+# The palette-tinted logo (rice-fetch-logo) wins over a plain logo.gif.
+if [[ -z "${LOGO_GIF:-}" ]]; then
+    LOGO_GIF="$HOME/.cache/rice/fetch-logo.gif"
+    [[ -r "$LOGO_GIF" ]] || LOGO_GIF="$CFG/logo.gif"
+fi
 LOGO_PNG="${LOGO_PNG:-$CFG/logo.png}"
 
 # side  - logo beside the info, the classic fetch look.

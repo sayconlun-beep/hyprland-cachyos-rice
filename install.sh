@@ -6,8 +6,8 @@
 #   ./install.sh --uninstall            dry run of the reverse
 #   ./install.sh --uninstall --apply    remove the links, put moved-aside files back
 #
-# Every file in config/ and local/bin/ is SYMLINKED into ~/.config and
-# ~/.local/bin one at a time, so this checkout is your live config: edit it
+# Every file in config/, local/bin/ and local/share/applications/ is SYMLINKED
+# into ~/.config, ~/.local/bin and ~/.local/share/applications one at a time, so this checkout is your live config: edit it
 # here, `git pull` for updates. Directories are never linked wholesale -
 # ~/.config/gtk-3.0, kitty, btop and friends also hold things of yours.
 #
@@ -110,6 +110,9 @@ each() {   # each <function>: run it on every file the rice installs
     while IFS= read -r -d '' f; do
         "$1" "$f" "$HOME/.local/bin/${f##*/}"
     done < <(find "$root/local/bin" -maxdepth 1 -type f -print0 | sort -z)
+    while IFS= read -r -d '' f; do
+        "$1" "$f" "$HOME/.local/share/applications/${f##*/}"
+    done < <(find "$root/local/share/applications" -maxdepth 1 -type f -print0 2>/dev/null | sort -z)
 }
 
 # ------------------------------------------------------------- uninstall --

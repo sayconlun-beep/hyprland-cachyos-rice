@@ -29,6 +29,7 @@ Scope {
     property var captureMenu: null
     property var walls: null
     property var binds: null
+    property var displays: null
 
     readonly property string bin: Quickshell.env("HOME") + "/.local/bin/"
 
@@ -40,7 +41,9 @@ Scope {
           call: () => root.captureMenu.show() },
         { section: "Rice", icon: "󰉼", label: "Look", hint: "gaps, borders, rounding, blur",
           run: [bin + "rice-settings", "look"] },
-        { section: "Rice", icon: "󰍹", label: "Displays", hint: "resolution, scale, refresh, VRR",
+        { section: "Rice", icon: "󰍹", label: "Displays", hint: "arrange screens by dragging",
+          call: () => root.displays.show() },
+        { section: "Rice", icon: "󰍺", label: "Display modes", hint: "resolution, scale, refresh, VRR",
           run: [bin + "rice-settings", "displays"] },
         { section: "Rice", icon: "󰌌", label: "Keybinds", hint: "cheatsheet and rebinding",
           call: () => root.binds.show() },
@@ -172,8 +175,9 @@ Scope {
                 left: true
                 right: true
             }
-            // Below the bar, so the panel hangs from it.
-            exclusionMode: ExclusionMode.Normal
+            // Over the bar too (the panel is pushed below it), so clicking the
+            // bar closes the menu: exclusive focus sends every click here.
+            exclusionMode: ExclusionMode.Ignore
             color: "transparent"
             WlrLayershell.layer: WlrLayer.Overlay
             WlrLayershell.namespace: "rice-settings"
@@ -189,10 +193,10 @@ Scope {
                 id: panel
                 anchors.top: parent.top
                 anchors.right: parent.right
-                anchors.topMargin: 8
+                anchors.topMargin: Theme.barHeight + 8
                 anchors.rightMargin: 10
                 width: 400
-                height: Math.min(content.implicitHeight + 24, parent.height - 20)
+                height: Math.min(content.implicitHeight + 24, parent.height - Theme.barHeight - 20)
                 radius: 22
                 color: Theme.alpha(Theme.surface_container, 0.96)
                 border.width: 1

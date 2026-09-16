@@ -12,6 +12,7 @@ one, a Noctalia plugin.
   rice-monitor-ctl.py set DP-2 --vrr 2        apply live AND persist
   rice-monitor-ctl.py set DP-2 --scale 1.25 --no-save    live only, dies on reload
   rice-monitor-ctl.py reset DP-2              drop the override for one output
+  rice-monitor-ctl.py arrange DP-1=0x0 DP-2=2560x0    move several at once
   rice-monitor-ctl.py reapply                 push every saved override back
 
 Two layers, deliberately:
@@ -405,6 +406,86 @@ def cmd_set(args):
     return 0
 
 
+def logical_size(live):
+    """Width and height in layout px: scaled, and swapped when rotated 90/270."""
+    scale = live.get("scale") or 1
+    w, h = (live.get("width") or 0) / scale, (live.get("height") or 0) / scale
+    if (live.get("transform") or 0) % 2:
+        w, h = h, w
+    return round(w), round(h)
+
+
+def cmd_arrange(args):
+    """Place several outputs in one go - what the drag-to-arrange panel sends.
+
+    Positions are shifted so the layout's top-left corner is 0,0, then checked
+    for overlaps, applied live and saved together. One at a time through
+    `set` would pass through overlapping layouts on the way.
+    """
+    outs = live_outputs()
+    wanted = {}
+    for item in args.positions:
+        conn, eq, pos = item.partition("=")
+        m = re.match(r"^(-?\d+)x(-?\d+)$", pos.strip())
+        if not eq or not m:
+            die(f"bad position {item!r} - want OUTPUT=XxY, e.g. DP-1=2560x0", 2)
+        if conn not in outs:
+            die("unknown output %r - have: %s" % (conn, ", ".join(sorted(outs)) or "none"), 2)
+        if outs[conn]["disabled"]:
+            die(f"{conn} is turned off - turn it on before placing it", 2)
+        wanted[conn] = [int(m.group(1)), int(m.group(2))]
+    if not wanted:
+        die("nothing to arrange", 2)
+
+    left = min(p[0] for p in wanted.values())
+    top = min(p[1] for p in wanted.values())
+    boxes = {}
+    for conn, (x, y) in wanted.items():
+        w, h = logical_size(outs[conn]["live"])
+        boxes[conn] = (x - left, y - top, w, h)
+    names = sorted(boxes)
+    for i, a in enumerate(names):
+        ax, ay, aw, ah = boxes[a]
+        for b in names[i + 1:]:
+            bx, by, bw, bh = boxes[b]
+            if ax < bx + bw and bx < ax + aw and ay < by + bh and by < ay + ah:
+                die(f"{a} and {b} would overlap", 2)
+
+    result = {"outputs": {c: "%dx%d" % boxes[c][:2] for c in names}}
+    configs = {}
+    for conn in names:
+        cfg = configured(conn)
+        cfg["connector"] = conn
+        cfg["position"] = result["outputs"][conn]
+        configs[conn] = cfg
+
+    if not args.no_apply:
+        failed = []
+        for conn in names:
+            ok, detail = apply_live(configs[conn])
+            if not ok:
+                failed.append(f"{conn}: {detail}")
+        if failed:
+            # Put back the ones that did move, so a half-applied layout isn't left.
+            for conn in names:
+                live = outs[conn]["live"]
+                back = dict(configs[conn], position="%dx%d" % (live["x"], live["y"]))
+                apply_live(back)
+            result.update(applied=False, saved=False, detail="; ".join(failed))
+            print(json.dumps(result, indent=2))
+            return 1
+        result["applied"] = True
+
+    if not args.no_save:
+        rules = load_overrides()
+        rules.update(configs)
+        write_overrides(rules)
+        result["saved"] = True
+        result["file"] = OVERRIDES
+    print(json.dumps(result, indent=2))
+    return 0
+
+
 def cmd_reset(args):
     rules = load_overrides()
     if args.connector not in rules:
@@ -455,6 +536,12 @@ def main(argv=None):
     s.add_argument("--no-save", action="store_true", help="live only, lost on reload")
     s.add_argument("--force", action="store_true", help="skip mode/scale validation")
     s.set_defaults(fn=cmd_set)
+
+    a = sub.add_parser("arrange", help="place several outputs at once")
+    a.add_argument("positions", nargs="+", metavar="OUTPUT=XxY")
+    a.add_argument("--no-apply", action="store_true", help="write only, no live change")
+    a.add_argument("--no-save", action="store_true", help="live only, lost on reload")
+    a.set_defaults(fn=cmd_arrange)
 
     r = sub.add_parser("reset", help="drop one output's override")
     r.add_argument("connector")

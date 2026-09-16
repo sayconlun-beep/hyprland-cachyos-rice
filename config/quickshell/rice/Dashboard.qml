@@ -98,7 +98,7 @@ Scope {
                 left: true
                 right: true
             }
-            exclusionMode: ExclusionMode.Normal
+            exclusionMode: ExclusionMode.Ignore       // over the bar, so clicking it closes
             color: "transparent"
             WlrLayershell.layer: WlrLayer.Overlay
             WlrLayershell.namespace: "rice-dashboard"
@@ -112,10 +112,10 @@ Scope {
             Rectangle {
                 id: panel
                 anchors.top: parent.top
-                anchors.topMargin: 8
+                anchors.topMargin: Theme.barHeight + 8
                 anchors.horizontalCenter: parent.horizontalCenter
                 width: Math.min(parent.width - 40, 1080)
-                height: Math.min(content.implicitHeight + 40, parent.height - 20)
+                height: Math.min(content.implicitHeight + 40, parent.height - Theme.barHeight - 20)
                 radius: 30
                 color: Theme.alpha(Theme.surface_container, 0.97)
                 border.width: 1

@@ -33,6 +33,8 @@ else.
 - **On the desktop:** a clock, a cava visualiser and synced lyrics, each
   switchable from the settings hub.
 - **Wallhaven** search and download (`Super+Ctrl+W`).
+- **TTS Reader:** an audiobook-style reader for EPUB, PDF, DOCX and Markdown
+  with per-paragraph voices, which can save a book as an `.m4b` for your phone.
 - **Extras:** read-aloud with a subtitle tile, focus mode, Do Not Disturb
   while gaming, and a replay buffer on `F8`.
 
@@ -125,7 +127,8 @@ is no longer read: make them again, and they are saved as `conf.d/*.lua`.
 | `Print` / `Shift+Print` | area / whole screen to the clipboard |
 | `Super+Print` / `Ctrl+Print` | area to `~/Pictures` / area into satty |
 | `F8` | save the replay buffer (needs `gsr-replay-start` running) |
-| `Super+C` | clipboard history |
+| `Super+V` | clipboard history |
+| `Super+C` / `Super+Shift+C` | chess.com (floating, workspace 1) / GNOME Chess against the bot |
 | `Super+X` | session menu |
 | `Super+Esc` | lock |
 | `Super+Shift+A` / `Super+Shift+D` | look / display settings |
@@ -191,15 +194,15 @@ qs -c rice ipc call <target> <function>
 
 ## Optional extras
 
-- **Read-aloud** (`Super+P`) needs piper TTS; see [PACKAGES.md](PACKAGES.md).
+- **Read-aloud** (`Super+P`) and **TTS Reader** need piper TTS; see [PACKAGES.md](PACKAGES.md).
 - **Replay buffer:** run `gsr-replay-start` from your autostart; `F8` saves
   the last 3 minutes to `~/Videos/Replays`. `GSR_MONITOR` and `GSR_MIC`
   choose what it records.
 - **GameMode:** `config/gamemode.ini` turns on Do Not Disturb while a game
   runs. You need to be in the `gamemode` group.
-- **Wallhaven:** filters and an API key go in `~/.config/rice/wallhaven.env`
-  (`WALLHAVEN_CATEGORIES`, `WALLHAVEN_PURITY`, `WALLHAVEN_ATLEAST`,
-  `WALLHAVEN_RATIOS`, `WALLHAVEN_SORTING`, `WALLHAVEN_API_KEY`).
+- **Wallhaven:** `Super+Ctrl+W` opens a panel with search, filters and sorting;
+  they are saved to `~/.config/rice/wallhaven.json`. Add `"apikey": "..."`
+  there to unlock NSFW.
 - **Terminal greeting** (fish): `rice-fetch.sh` sizes the logo to the window.
   Put a `logo.gif` or `logo.png` (kitty), or `logo-large.txt` and
   `logo-small.txt` (text art), in `~/.config/fastfetch`. Otherwise it shows

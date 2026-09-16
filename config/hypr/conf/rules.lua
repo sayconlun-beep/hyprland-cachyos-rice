@@ -48,10 +48,10 @@ hl.window_rule({
     workspace = "1",
 })
 
--- Steam titles, wine/proton .exe windows, Lutris, emulators, Moonlight.
+-- Steam titles, native cs2, wine/proton .exe windows, Lutris, emulators, Moonlight.
 hl.window_rule({
     name = "games-to-main",
-    match = { class = [[^(steam_app_.*|.*\.exe|lutris|net\.lutris\.Lutris|moonlight|ryujinx)$]] },
+    match = { class = [[^(steam_app_.*|cs2|.*\.exe|lutris|net\.lutris\.Lutris|moonlight|ryujinx)$]] },
     workspace = "1",
     fullscreen = true,
     immediate = true,

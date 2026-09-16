@@ -72,6 +72,11 @@ output_path = "~/.config/cava/config"
 input_path = "~/.config/matugen/templates/fastfetch.jsonc"
 output_path = "~/.config/fastfetch/config.jsonc"
 
+# The login screen: rice-greeter-sync stages this for noctalia-greeter.
+[templates.greeter]
+input_path = "~/.config/matugen/templates/greeter-palette.toml"
+output_path = "~/.cache/rice/greeter-palette.toml"
+
 # The Quickshell overlays (carousel, keybind menu) watch this file themselves.
 [templates.quickshell]
 input_path = "~/.config/matugen/templates/quickshell.json"

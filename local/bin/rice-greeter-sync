@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# Copy the current wallpaper and palette to the login screen (noctalia-greeter).
+# Noctalia used to do this itself; without it the greeter stays frozen on the
+# last look Noctalia sent it.
+#
+#   rice-greeter-sync           sync now (polkit asks for the password unless
+#                               passwordless sync is enabled - see below)
+#   rice-greeter-sync --auto    what rice-wallpaper runs after every change:
+#                               does nothing unless auto-sync is switched on,
+#                               and skips when nothing changed
+#
+# Auto-sync, so wallpaper swaps don't pop a password dialog each time:
+#   pkexec noctalia-greeter passwordless-sync enable "$USER"   # one-off, root;
+#                               # the rule allows ONLY this appearance helper
+#   mkdir -p ~/.config/rice && touch ~/.config/rice/greeter-autosync
+# (`passwordless-sync status` can't be read without root, hence the marker.)
+#
+# The greeter's constrained helper insists on exactly this staging layout:
+# /run/user/<uid>/noctalia-greeter-sync, owned by us, holding a sync.toml with
+# a complete palette (no session or output keys) plus wallpaper.<ext> files that
+# the toml references under /var/lib/noctalia-greeter.
+set -uo pipefail
+
+CACHE="$HOME/.cache/rice"
+PALETTE="$CACHE/greeter-palette.toml"      # written by matugen
+STAMP="$CACHE/greeter-synced"              # what was last synced
+HELPER=/usr/bin/noctalia-greeter-apply-appearance
+RUNTIME="/run/user/$(id -u)"
+STAGE="$RUNTIME/noctalia-greeter-sync"
+
+auto=0
+[[ "${1:-}" == --auto ]] && auto=1
+
+say() {
+    echo "rice-greeter-sync: $*" >&2
+    (( auto )) && notify-send -a rice-greeter-sync "Login screen" "$*" 2>/dev/null
+    return 0
+}
+
+[[ -x "$HELPER" ]] || { (( auto )) || say "noctalia-greeter is not installed"; exit 0; }
+
+wall="$(readlink -f "$CACHE/wallpaper" 2>/dev/null)"
+[[ -f "$wall" ]] || { say "no current wallpaper (~/.cache/rice/wallpaper)"; exit 1; }
+[[ -s "$PALETTE" ]] || { say "no greeter palette yet - run rice-wallpaper theme"; exit 1; }
+mode="$(cat "$CACHE/mode" 2>/dev/null)"
+[[ "$mode" == light ]] || mode=dark
+
+if (( auto )); then
+    [[ -e "$HOME/.config/rice/greeter-autosync" ]] || exit 0
+    key="$(cat "$PALETTE" <(echo "$mode $wall") | md5sum | cut -c1-32)"
+    [[ "$(cat "$STAMP" 2>/dev/null)" == "$key" ]] && exit 0
+fi
+
+# One sync at a time; a wallpaper burst from the carousel collapses into the
+# last one because each run re-reads the current state after taking the lock.
+exec 9>"$RUNTIME/rice-greeter-sync.lock"
+flock 9
+
+# The greeter decodes png/jpeg/gif/bmp/webp; keep the file as it is.
+ext="${wall##*.}"; ext="${ext,,}"
+case "$ext" in
+    png|jpg|jpeg|gif|bmp|webp) ;;
+    *) say "unsupported wallpaper type: $wall"; exit 1 ;;
+esac
+
+# Recompute after the lock: an earlier run may have already synced this.
+key="$(cat "$PALETTE" <(echo "$mode $wall") | md5sum | cut -c1-32)"
+(( auto )) && [[ "$(cat "$STAMP" 2>/dev/null)" == "$key" ]] && exit 0
+
+rm -rf -- "$STAGE"
+mkdir -m 700 -- "$STAGE" || { say "cannot create $STAGE"; exit 1; }
+trap 'rm -rf -- "$STAGE"' EXIT
+umask 022
+
+cp -- "$wall" "$STAGE/wallpaper.$ext" || { say "cannot stage $wall"; exit 1; }
+# No font_family: the rice's fonts live in ~/.local/share/fonts, which the
+# greeter account cannot see, so it keeps its own default.
+{
+    printf '[appearance]\nscheme = "Synced"\ntheme_mode = "%s"\n\n' "$mode"
+    grep -v '^#' "$PALETTE"
+    printf '\n[appearance.wallpaper]\npath = "/var/lib/noctalia-greeter/wallpaper.%s"\nfill_mode = "crop"\n' "$ext"
+} > "$STAGE/sync.toml"
+
+if out="$(pkexec --disable-internal-agent "$HELPER" --sync "$STAGE" 2>&1)"; then
+    printf '%s\n' "$key" > "$STAMP"
+    (( auto )) || echo "Login screen synced: $(basename "$wall"), $mode."
+else
+    say "sync failed: ${out:-pkexec was cancelled}"
+    exit 1
+fi

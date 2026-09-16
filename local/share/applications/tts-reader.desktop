@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=TTS Reader
+GenericName=Audiobook Reader
+Comment=Read EPUB, PDF, DOCX and Markdown files aloud with the piper voice
+# ~/.local/bin is not on the session PATH, and a desktop file can't expand ~.
+Exec=sh -c "exec \\"\\$HOME/.local/bin/tts-reader\\" \\"\\$@\\"" tts-reader %f
+Icon=audiobook
+Terminal=false
+Categories=Office;Viewer;
+MimeType=application/epub+zip;application/pdf;application/vnd.openxmlformats-officedocument.wordprocessingml.document;text/markdown;
+Keywords=tts;speech;audiobook;epub;pdf;docx;markdown;read aloud;
+StartupWMClass=rice.TtsReader

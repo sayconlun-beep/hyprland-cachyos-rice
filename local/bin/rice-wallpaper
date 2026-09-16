@@ -76,7 +76,11 @@ show() {   # show <file> none|wipe
     ln -sfn "$f" "$CURRENT"
     theme "$f"
     "$HOME/.local/bin/rice-theme-reload"
+    greeter_sync
 }
+
+# The login screen follows too; a no-op unless auto-sync is on (see the script).
+greeter_sync() { setsid -f "$HOME/.local/bin/rice-greeter-sync" --auto >/dev/null 2>&1; }
 
 index_of_current() {   # prints -1 when the current image is not in the folder
     local cur i; cur="$(current)"
@@ -91,14 +95,16 @@ load() {
     (( ${#all[@]} )) || die "no wallpapers in $DIR"
 }
 
-thumb_path() { printf '%s/%s.png' "$THUMBS" "$(printf '%s' "$1" | md5sum | cut -c1-16)"; }
+# Big enough for the carousel's middle card; the size is in the name so a
+# change regenerates them instead of reusing smaller ones.
+thumb_path() { printf '%s/%s.png' "$THUMBS" "$(printf '%s|1040' "$1" | md5sum | cut -c1-16)"; }
 
 make_thumbs() {
     local f t
     for f in "${all[@]}"; do
         t="$(thumb_path "$f")"
         [[ -s "$t" && "$t" -nt "$f" ]] && continue
-        magick "${f}[0]" -thumbnail 520x325^ -gravity center -extent 520x325 "$t" 2>/dev/null &
+        magick "${f}[0]" -thumbnail 1040x650^ -gravity center -extent 1040x650 "$t" 2>/dev/null &
         (( $(jobs -rp | wc -l) >= 8 )) && wait -n
     done
     wait
@@ -213,6 +219,7 @@ case "${1:-}" in
         [[ -f "$f" ]] || die "no wallpaper to derive a palette from"
         theme "$f"
         "$HOME/.local/bin/rice-theme-reload"
+        greeter_sync
         ;;
     *)
         sed -n '2,/^$/s/^# \{0,1\}//p' "$0"

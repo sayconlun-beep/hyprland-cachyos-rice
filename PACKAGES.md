@@ -51,6 +51,10 @@ power-profiles-daemon, all enabled.
 - `firefox` - `Super+B`. Change `$browser` in `binds.conf` for another browser.
 - `steam` - `Super+Enter`, and games are sent to workspace 1.
 - `fish` - the terminal greeting (`rice-fetch.sh`).
+- `chromium` - `Super+C`, chess.com as a floating web app on workspace 1.
+- `gnome-chess`, `gnuchess` - `Super+Shift+C`, offline chess against the GNU Chess
+  bot (set the opponent in its preferences, or
+  `gsettings set org.gnome.Chess opponent 'GNU Chess'`).
 - `gamemode` - Do Not Disturb while a game runs. Add yourself to the
   `gamemode` group.
 - `mpv`, `foot`.
@@ -59,6 +63,13 @@ power-profiles-daemon, all enabled.
   `~/.local/share/piper-tts/voices/` (default `en_GB-jenny_dioco-medium`, or
   set `PIPER_VOICE`). `/usr/bin/piper` on Arch is the Logitech mouse tool, not
   this.
+- **TTS Reader** (`tts-reader`, in the app launcher): reads EPUB, PDF, DOCX and
+  Markdown aloud with piper or Kokoro voices, gives dialogue paragraphs their own
+  voices, and saves a book as an `.m4b` audiobook with chapters. Needs piper as
+  above plus `libadwaita`, `poppler-glib`, `python-lxml`, `mpv`, and `ffmpeg` with
+  `python-numpy` for the audiobook export. For the Kokoro voices run
+  `kokoro-tts --setup` once (a venv and the ~350 MB model in
+  `~/.local/share/kokoro-tts`).
 - The settings hub's **CachyOS** section only works on CachyOS. Elsewhere,
   delete those entries from `config/quickshell/rice/SettingsMenu.qml`.
 

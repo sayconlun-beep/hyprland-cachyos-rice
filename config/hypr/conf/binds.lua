@@ -16,6 +16,8 @@ local browser = "firefox"
 
 -- ------------------------------------------------------------------- apps --
 bind("SUPER + RETURN",         exec("steam"))
+bind("SUPER + C",              exec(bin .. "/open-chess.sh"))     -- chess.com, floating on workspace 1
+bind("SUPER + SHIFT + C",      exec("gnome-chess"))               -- offline chess against the GNU Chess bot
 bind("SUPER + T",              exec(term))
 bind("CTRL + ALT + DELETE",    exec(term .. " --class taskmgr -e btop"))
 bind("SUPER + SPACE",          exec("rofi -show drun -theme ~/.config/rofi/launcher.rasi"))
@@ -30,7 +32,7 @@ bind("SUPER + S",              dsp.window.fullscreen())
 bind("SUPER + A",              dsp.layout("togglesplit"))
 
 -- ------------------------------------------------------------------ shell --
-bind("SUPER + C",              exec(bin .. "/rice-clipboard"))
+bind("SUPER + V",              exec(bin .. "/rice-clipboard"))
 bind("SUPER + N",              exec("qs -c rice ipc call notifications toggle"))   -- notification centre
 bind("SUPER + X",              exec(bin .. "/rice-power"))
 bind("SUPER + ESCAPE",         exec("loginctl lock-session"))           -- hypridle locks (Quickshell, else hyprlock)

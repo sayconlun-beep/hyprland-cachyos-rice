@@ -5,10 +5,11 @@ Read-aloud tile - GTK3 + gtk-layer-shell.
 A small overlay card shown while read-aloud.sh is playing: the sentence
 currently being spoken, with a play/pause button and progress beneath it.
 
-Sync is exact rather than estimated. read-aloud.sh renders ONE WAV PER
-SENTENCE and queues them in order, so mpv's `playlist-pos` IS the sentence
-index - there is no timing model to drift. Subtitles land on the sentence
-boundary because they are the same boundary.
+Sync is exact rather than estimated. read-aloud.sh and tts-reader render ONE
+WAV PER SENTENCE named sNNNNN*.wav, so the file mpv is playing names the
+sentence index - there is no timing model to drift. Subtitles land on the
+sentence boundary because they are the same boundary. (Not playlist-pos:
+tts-reader starts its playlist wherever you jumped to in the book.)
 
 State arrives by `observe_property` over mpv's IPC socket, not by polling,
 so pause and sentence changes show up immediately.
@@ -263,11 +264,16 @@ class TtsTile:
         return None
 
     def _load_sentences(self):
+        path = os.path.join(self.rdir, "sentences.json")
         try:
-            with open(os.path.join(self.rdir, "sentences.json")) as fh:
+            mtime = os.stat(path).st_mtime_ns
+            if mtime == getattr(self, "_sentences_mtime", None):
+                return
+            with open(path) as fh:
                 self.sentences = json.load(fh)
-        except OSError:
-            self.sentences = []
+            self._sentences_mtime = mtime
+        except (OSError, ValueError):
+            pass
 
     # -- mpv IPC -------------------------------------------------------
     def _connect(self):
@@ -279,7 +285,7 @@ class TtsTile:
         except OSError:
             return True
         self.sock = s
-        for i, prop in enumerate(("playlist-pos", "pause"), start=1):
+        for i, prop in enumerate(("path", "pause"), start=1):
             self._send({"command": ["observe_property", i, prop]})
         ch = GLib.IOChannel.unix_new(s.fileno())
         ch.set_encoding(None)
@@ -328,14 +334,19 @@ class TtsTile:
         name, value = msg.get("name"), msg.get("data")
         if name == "pause":
             self.tile.update(paused=bool(value))
-        elif name == "playlist-pos" and isinstance(value, int) and value >= 0:
-            # Sentences may still be rendering, so re-read the manifest when
-            # playback runs past what we last loaded.
-            if value >= len(self.sentences):
-                self._load_sentences()
-            text = (self.sentences[value] if value < len(self.sentences)
-                    else "...")
-            self.tile.update(text=text, pos=value, total=len(self.sentences))
+        elif name == "path" and isinstance(value, str):
+            # The sNNNNN in the WAV name is the sentence index. playlist-pos
+            # only matches it for read-aloud.sh; tts-reader starts its
+            # playlist wherever you jumped to in the book.
+            m = re.search(r"/s(\d+)[^/]*\.wav$", value)
+            if not m:
+                return
+            idx = int(m.group(1))
+            # Sentences may still be rendering, and tts-reader rewrites the
+            # list when it opens another book, so reload on any change.
+            self._load_sentences()
+            text = self.sentences[idx] if idx < len(self.sentences) else "..."
+            self.tile.update(text=text, pos=idx, total=len(self.sentences))
 
 
 def main():

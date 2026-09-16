@@ -120,6 +120,8 @@ ACTIONS = [
 # First match wins; matched against "dispatcher arg" with ~/.local/bin/ removed.
 LABELS = [
     (r"^exec steam$", "Steam"),
+    (r"open-chess\.sh", "chess.com (workspace 1)"),
+    (r"^exec gnome-chess$", "Chess against the bot"),
     (r"^exec kitty --class taskmgr", "Task manager"),
     (r"^exec kitty$", "Terminal"),
     (r"^exec rofi -show drun", "App launcher"),
