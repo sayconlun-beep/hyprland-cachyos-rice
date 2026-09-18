@@ -42,7 +42,7 @@ wall="$(readlink -f "$CACHE/wallpaper" 2>/dev/null)"
 [[ -f "$wall" ]] || { say "no current wallpaper (~/.cache/rice/wallpaper)"; exit 1; }
 
 # The rice's own login screen (greeter/ in the repo) reads its wallpaper,
-# palette, font and user name from here. The directory is ours, so this needs
+# palette, font, user name and theme name from here. The directory is ours, so this needs
 # no root and runs on every wallpaper change.
 RG=/var/lib/rice-greeter
 if [[ -d "$RG" && -w "$RG" ]]; then
@@ -52,6 +52,10 @@ if [[ -d "$RG" && -w "$RG" ]]; then
         [[ -f "$HOME/.local/share/fonts/$font" && ! -f "$RG/$font" ]] && cp -- "$HOME/.local/share/fonts/$font" "$RG/"
     done
     [[ "$(cat "$RG/user" 2>/dev/null)" == "$USER" ]] || echo "$USER" > "$RG/user"
+    # the theme's name, the login screen's subtitle ("Tokyo Night"; "" for the wallpaper theme)
+    theme="$(cat "$CACHE/theme" 2>/dev/null)"
+    [[ -n "$theme" && -f "$HOME/.config/rice/themes/$theme/colors.toml" ]] || theme=""
+    sed -E 's/[-_]+/ /g; s/\b(.)/\u\1/g' <<< "$theme" > "$RG/theme.tmp" && mv -f -- "$RG/theme.tmp" "$RG/theme"
     chmod a+r "$RG"/* 2>/dev/null
 fi
 

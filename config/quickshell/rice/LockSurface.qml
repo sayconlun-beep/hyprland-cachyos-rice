@@ -1,9 +1,19 @@
 // The lock screen's content, shared by the real lock (one per monitor) and
 // the preview window. See Lock.qml for the safety notes.
+//
+// Laid out like a Frieren-themed login screen - one column on the left over
+// the current wallpaper, undimmed:
+//
+//   CACHYOS / ──◇── / theme name, a big clock and the date, the user, the
+//   password pill (the eye shows it), Unlock; "Locked" and small power
+//   buttons along the bottom.
+//
+// What's playing and what Steam is downloading stay at the bottom right.
 import QtQuick
 import QtQuick.Effects
 import QtQuick.Layouts
 import Quickshell
+import Quickshell.Io
 import Quickshell.Widgets
 
 Item {
@@ -13,7 +23,14 @@ Item {
     property bool preview: false
     property date now: new Date()
     property string armed: ""               // restart / poweroff waiting for a second click
+    property string osName: "Linux"
+    property string themeName: ""
+    property bool reveal: false             // the eye: show the password as typed
 
+    // The column: centred on the left fifth of the screen, a fifth wide.
+    readonly property real colW: Math.round(Math.min(width * 0.2, 480))
+    readonly property real colX: Math.round(width * 0.2 - colW / 2)
+    readonly property real u: height / 100  // 1% of the height
     readonly property string home: Quickshell.env("HOME")
 
     Timer {
@@ -38,6 +55,23 @@ Item {
         }
     }
 
+    FileView {
+        path: "/etc/os-release"
+        onLoaded: {
+            const m = /^PRETTY_NAME="?([^"\n]*)"?/m.exec(text())
+            if (m)
+                surface.osName = m[1].replace(/ Linux$/, "")
+        }
+    }
+
+    // The rice's theme ("tokyo-night" -> "Tokyo Night"); none for the wallpaper theme.
+    FileView {
+        path: surface.home + "/.cache/rice/theme"
+        printErrors: false
+        onLoaded: surface.themeName = text().trim().replace(/[-_]+/g, " ").replace(/\b\w/g, c => c.toUpperCase())
+        onLoadFailed: surface.themeName = ""
+    }
+
     function power(action) {
         if (surface.preview)
             return
@@ -51,35 +85,26 @@ Item {
     }
 
     // ------------------------------------------------------------ backdrop --
+    // The wallpaper as it is, sharp and undimmed; only a soft shade behind the
+    // column so white text stays readable on a bright picture.
     Image {
-        id: wallpaper
         anchors.fill: parent
         source: "file://" + surface.home + "/.cache/rice/wallpaper"
         fillMode: Image.PreserveAspectCrop
         asynchronous: true
         cache: false
-        visible: false
-    }
-
-    // A light blur, so the wallpaper still reads as itself, and a scrim that
-    // is darker only where the text sits (top clock, bottom power row).
-    MultiEffect {
-        anchors.fill: parent
-        source: wallpaper
-        blurEnabled: true
-        blur: 0.3
-        blurMax: 40
-        brightness: -0.05
-        saturation: 0.15
     }
 
     Rectangle {
-        anchors.fill: parent
+        anchors.top: parent.top
+        anchors.bottom: parent.bottom
+        anchors.left: parent.left
+        width: parent.width * 0.5
         gradient: Gradient {
+            orientation: Gradient.Horizontal
             GradientStop { position: 0.0; color: Qt.rgba(0, 0, 0, 0.30) }
-            GradientStop { position: 0.35; color: Qt.rgba(0, 0, 0, 0.12) }
-            GradientStop { position: 0.7; color: Qt.rgba(0, 0, 0, 0.18) }
-            GradientStop { position: 1.0; color: Qt.rgba(0, 0, 0, 0.50) }
+            GradientStop { position: 0.55; color: Qt.rgba(0, 0, 0, 0.12) }
+            GradientStop { position: 1.0; color: "transparent" }
         }
     }
 
@@ -88,132 +113,192 @@ Item {
         onClicked: input.forceActiveFocus()
     }
 
-    // --------------------------------------------------------------- clock --
-    // The desktop clock (DesktopClock.qml), in the same place and style.
+    // ----------------------------------------------------------- the column --
     Item {
+        id: column
         anchors.fill: parent
 
         layer.enabled: true
         layer.effect: MultiEffect {
             shadowEnabled: true
-            shadowColor: Qt.rgba(0, 0, 0, 0.55)
-            shadowBlur: 0.9
-            shadowVerticalOffset: 3
+            shadowColor: Qt.rgba(0, 0, 0, 0.6)
+            shadowBlur: 0.8
+            shadowVerticalOffset: 2
         }
 
+        // Title: the OS in spaced serif capitals, a rule, the theme's name.
         Column {
-            anchors.horizontalCenter: parent.horizontalCenter
-            anchors.top: parent.top
-            anchors.topMargin: Math.round(surface.height * 0.12) + 10
-            spacing: 2
+            x: surface.colX
+            width: surface.colW
+            y: Math.round(surface.u * 15)
+            spacing: Math.round(surface.u * 0.6)
 
             Text {
                 anchors.horizontalCenter: parent.horizontalCenter
-                text: Qt.formatDate(surface.now, "dddd, MMMM d, yyyy")
-                color: Theme.on_surface
-                opacity: 0.65
-                font.family: Theme.mono
-                font.pixelSize: 20
+                text: surface.osName.toUpperCase()
+                color: "white"
+                font.family: "Noto Serif"
+                font.pixelSize: Math.round(surface.u * 3.6)
+                font.letterSpacing: Math.round(surface.u * 0.9)
             }
 
             Row {
                 anchors.horizontalCenter: parent.horizontalCenter
-                spacing: 8
+                spacing: Math.round(surface.u * 0.8)
 
-                Text {
-                    id: bigTime
-                    text: Qt.formatTime(surface.now, "h:mm:ss")
-                    color: Theme.primary
-                    font.family: Theme.font
-                    font.pixelSize: 96
-                    font.weight: Font.Light
-                    font.features: { "tnum": 1 }
+                Rectangle {
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: surface.colW * 0.24
+                    height: 1
+                    color: Qt.rgba(1, 1, 1, 0.7)
                 }
-
-                Text {
-                    anchors.baseline: bigTime.baseline
-                    text: Qt.formatTime(surface.now, "AP")
-                    color: Theme.primary
-                    opacity: 0.7
-                    font.family: Theme.font
-                    font.pixelSize: 23
+                Rectangle {
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: Math.round(surface.u * 0.8)
+                    height: width
+                    rotation: 45
+                    color: "transparent"
+                    border.width: 1
+                    border.color: Qt.rgba(1, 1, 1, 0.85)
+                }
+                Rectangle {
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: surface.colW * 0.24
+                    height: 1
+                    color: Qt.rgba(1, 1, 1, 0.7)
                 }
             }
-        }
-    }
 
-    // ------------------------------------------------------------- content --
-    // Username and password, sitting just above the power buttons.
-    ColumnLayout {
-        anchors.horizontalCenter: parent.horizontalCenter
-        anchors.bottom: powerRow.top
-        anchors.bottomMargin: 28
-        width: 440
-        spacing: 12
-
-        layer.enabled: true
-        layer.effect: MultiEffect {
-            shadowEnabled: true
-            shadowColor: "black"
-            shadowOpacity: 0.55
-            shadowBlur: 0.9
-            shadowVerticalOffset: 2
+            Text {
+                anchors.horizontalCenter: parent.horizontalCenter
+                text: surface.themeName || "Welcome back"
+                color: "white"
+                font.family: "Noto Serif"
+                font.pixelSize: Math.round(surface.u * 2.3)
+                font.letterSpacing: 0.5
+            }
         }
 
-        Text {
-            Layout.alignment: Qt.AlignHCenter
-            text: Quickshell.env("USER") || ""
-            color: "white"
-            font.family: Theme.font
-            font.pixelSize: 17
-            font.weight: Font.DemiBold
-        }
+        // The clock and date.
+        Column {
+            x: surface.colX
+            width: surface.colW
+            y: Math.round(surface.u * 25.5)
+            spacing: 0
 
-        Rectangle {
-            id: field
-            Layout.alignment: Qt.AlignHCenter
-            implicitWidth: 360
-            implicitHeight: 52
-            radius: 10
-            color: Theme.alpha(Theme.surface_container, 0.55)
-            border.width: 2
-            border.color: surface.lock && surface.lock.error ? Theme.error : Theme.primary
-            Behavior on border.color {
-                ColorAnimation { duration: 150 }
+            Text {
+                anchors.horizontalCenter: parent.horizontalCenter
+                text: Qt.formatTime(surface.now, "h:mm")
+                color: Qt.rgba(1, 1, 1, 0.88)
+                font.family: Theme.font
+                font.pixelSize: Math.round(surface.u * 10)
+                font.weight: Font.Light
+                font.features: { "tnum": 1 }
             }
 
-            transform: Translate { id: shakeOffset }
-
-            SequentialAnimation {
-                id: shake
-                NumberAnimation { target: shakeOffset; property: "x"; to: -14; duration: 50 }
-                NumberAnimation { target: shakeOffset; property: "x"; to: 14; duration: 70 }
-                NumberAnimation { target: shakeOffset; property: "x"; to: -9; duration: 60 }
-                NumberAnimation { target: shakeOffset; property: "x"; to: 9; duration: 60 }
-                NumberAnimation { target: shakeOffset; property: "x"; to: 0; duration: 50 }
+            Text {
+                anchors.horizontalCenter: parent.horizontalCenter
+                text: Qt.formatDate(surface.now, "dddd d MMMM")
+                color: Qt.rgba(1, 1, 1, 0.9)
+                font.family: Theme.font
+                font.pixelSize: Math.round(surface.u * 2.4)
+                font.weight: Font.Light
+                font.letterSpacing: 1.5
             }
+        }
 
-            RowLayout {
-                anchors.fill: parent
-                anchors.leftMargin: 22
-                anchors.rightMargin: 7
-                spacing: 12
+        // User, password, Login.
+        ColumnLayout {
+            x: surface.colX
+            width: surface.colW
+            y: Math.round(surface.u * 52)
+            spacing: Math.round(surface.u * 1.6)
+
+            // (user)  name - the name centred in the row, like the field below
+            Item {
+                Layout.fillWidth: true
+                implicitHeight: Math.round(surface.u * 3.4)
 
                 LucideIcon {
-                    icon: "lock"
-                    size: 18
+                    anchors.verticalCenter: parent.verticalCenter
+                    x: Math.round(surface.u * 1.4)
+                    icon: "user"
+                    size: Math.round(surface.u * 1.5)
                     color: "white"
-                    opacity: 0.8
+                }
+
+                Text {
+                    anchors.centerIn: parent
+                    text: (Quickshell.env("USER") || "").toUpperCase()
+                    color: "white"
+                    font.family: Theme.font
+                    font.pixelSize: Math.round(surface.u * 1.25)
+                    font.weight: Font.Bold
+                    font.letterSpacing: 1
+                }
+            }
+
+            // (eye)  password, in a pill
+            Rectangle {
+                id: field
+                Layout.fillWidth: true
+                implicitHeight: Math.round(surface.u * 3.4)
+                radius: height / 2
+                color: Qt.rgba(1, 1, 1, input.activeFocus ? 0.14 : 0.08)
+                border.width: 1.5
+                border.color: surface.lock && surface.lock.error ? Theme.error
+                    : Qt.rgba(1, 1, 1, input.activeFocus ? 0.75 : 0.45)
+                Behavior on border.color {
+                    ColorAnimation { duration: 150 }
+                }
+
+                transform: Translate { id: shakeOffset }
+
+                SequentialAnimation {
+                    id: shake
+                    NumberAnimation { target: shakeOffset; property: "x"; to: -14; duration: 50 }
+                    NumberAnimation { target: shakeOffset; property: "x"; to: 14; duration: 70 }
+                    NumberAnimation { target: shakeOffset; property: "x"; to: -9; duration: 60 }
+                    NumberAnimation { target: shakeOffset; property: "x"; to: 9; duration: 60 }
+                    NumberAnimation { target: shakeOffset; property: "x"; to: 0; duration: 50 }
+                }
+
+                LucideIcon {
+                    id: eye
+                    anchors.verticalCenter: parent.verticalCenter
+                    x: Math.round(surface.u * 1.4)
+                    icon: surface.reveal ? "eye-off" : "eye"
+                    size: Math.round(surface.u * 1.5)
+                    color: "white"
+                    opacity: eyeArea.containsMouse ? 1 : 0.8
+
+                    MouseArea {
+                        id: eyeArea
+                        anchors.fill: parent
+                        anchors.margins: -8
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            surface.reveal = !surface.reveal
+                            input.forceActiveFocus()
+                        }
+                    }
                 }
 
                 TextInput {
                     id: input
-                    Layout.fillWidth: true
-                    echoMode: TextInput.Password
-                    passwordCharacter: "●"
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.left: eye.right
+                    anchors.right: parent.right
+                    anchors.leftMargin: Math.round(surface.u * 1)
+                    anchors.rightMargin: Math.round(surface.u * 2.9)   // stay centred against the eye
+                    horizontalAlignment: TextInput.AlignHCenter
+                    echoMode: surface.reveal ? TextInput.Normal : TextInput.Password
+                    passwordCharacter: "•"
                     color: "white"
                     font.family: Theme.font
-                    font.pixelSize: 18
+                    font.pixelSize: Math.round(surface.u * 1.35)
+                    font.letterSpacing: surface.reveal ? 0 : 2
                     clip: true
                     focus: true
                     enabled: !(surface.lock && surface.lock.busy)
@@ -229,67 +314,121 @@ Item {
                     }
 
                     Text {
-                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.centerIn: parent
                         visible: !input.text
                         text: "Password"
                         color: "white"
-                        opacity: 0.45
-                        font: input.font
+                        opacity: 0.5
+                        font.family: Theme.font
+                        font.pixelSize: input.font.pixelSize
                     }
                 }
+            }
 
-                Rectangle {
-                    implicitWidth: 38
-                    implicitHeight: 38
-                    radius: 7
-                    color: Theme.primary
+            // Login
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.topMargin: Math.round(surface.u * 1)
+                implicitHeight: Math.round(surface.u * 3.4)
+                radius: height / 2
+                color: Qt.rgba(1, 1, 1, loginArea.pressed ? 0.42 : loginArea.containsMouse ? 0.34 : 0.26)
+                Behavior on color {
+                    ColorAnimation { duration: 120 }
+                }
+
+                Row {
+                    anchors.centerIn: parent
+                    spacing: 8
 
                     LucideIcon {
-                        id: submitIcon
-                        anchors.centerIn: parent
-                        icon: surface.lock && surface.lock.busy ? "loader-circle" : "arrow-right"
-                        size: 18
-                        color: Theme.on_primary
-
+                        id: spinner
+                        anchors.verticalCenter: parent.verticalCenter
+                        visible: surface.lock && surface.lock.busy
+                        icon: "loader-circle"
+                        size: Math.round(surface.u * 1.4)
+                        color: "white"
                         NumberAnimation on rotation {
-                            running: surface.lock && surface.lock.busy
+                            running: spinner.visible
                             from: 0
                             to: 360
                             duration: 900
                             loops: Animation.Infinite
-                            onRunningChanged: if (!running) submitIcon.rotation = 0
                         }
                     }
 
+                    Text {
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: surface.lock && surface.lock.busy ? "Unlocking" : "Unlock"
+                        color: "white"
+                        font.family: Theme.font
+                        font.pixelSize: Math.round(surface.u * 1.3)
+                        font.weight: Font.DemiBold
+                    }
+                }
+
+                MouseArea {
+                    id: loginArea
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: surface.lock.submit(input.text)
+                }
+            }
+
+            Text {
+                Layout.alignment: Qt.AlignHCenter
+                Layout.preferredHeight: Math.round(surface.u * 2)
+                text: surface.lock ? surface.lock.error : ""
+                color: Theme.error
+                font.family: Theme.font
+                font.pixelSize: Math.round(surface.u * 1.2)
+                font.weight: Font.DemiBold
+            }
+        }
+
+        // Session, and the power buttons, small, along the bottom.
+        Row {
+            x: surface.colX
+            y: Math.round(surface.u * 92)
+            spacing: Math.round(surface.u * 1.6)
+
+            Text {
+                anchors.verticalCenter: parent.verticalCenter
+                text: surface.armed === "reboot" ? "Click again to restart"
+                    : surface.armed === "poweroff" ? "Click again to power off"
+                    : surface.preview ? "Preview - Esc closes" : "Locked"
+                color: surface.armed ? Theme.error : "white"
+                opacity: surface.armed ? 1 : 0.85
+                font.family: Theme.font
+                font.pixelSize: Math.round(surface.u * 1.1)
+            }
+
+            Repeater {
+                model: [
+                    { action: "suspend", icon: "moon" },
+                    { action: "reboot", icon: "rotate-ccw" },
+                    { action: "poweroff", icon: "power" }
+                ]
+
+                LucideIcon {
+                    required property var modelData
+                    anchors.verticalCenter: parent.verticalCenter
+                    icon: modelData.icon
+                    size: Math.round(surface.u * 1.5)
+                    color: surface.armed === modelData.action ? Theme.error : "white"
+                    opacity: surface.preview ? 0.35 : powerArea.containsMouse || surface.armed === modelData.action ? 1 : 0.65
+
                     MouseArea {
+                        id: powerArea
                         anchors.fill: parent
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: surface.lock.submit(input.text)
+                        anchors.margins: -8
+                        hoverEnabled: true
+                        cursorShape: surface.preview ? Qt.ArrowCursor : Qt.PointingHandCursor
+                        onClicked: surface.power(modelData.action)
                     }
                 }
             }
         }
-
-        Text {
-            Layout.alignment: Qt.AlignHCenter
-            Layout.preferredHeight: 20
-            text: surface.lock ? surface.lock.error : ""
-            color: Theme.error
-            font.family: Theme.font
-            font.pixelSize: 14
-            font.weight: Font.DemiBold
-        }
-
-        Text {
-            Layout.alignment: Qt.AlignHCenter
-            visible: surface.preview
-            text: "Preview - nothing is locked. Try your password, or Esc to close."
-            color: "white"
-            opacity: 0.75
-            font.family: Theme.font
-            font.pixelSize: 13
-        }
-
     }
 
     // ------------------------------------------------------ bottom right --
@@ -449,63 +588,6 @@ Item {
                         font.pixelSize: 12
                         font.features: { "tnum": 1 }
                     }
-                }
-            }
-        }
-    }
-
-    // ---------------------------------------------------------------- power --
-    Row {
-        id: powerRow
-        anchors.horizontalCenter: parent.horizontalCenter
-        anchors.bottom: parent.bottom
-        anchors.bottomMargin: 50
-        spacing: 26
-        opacity: surface.preview ? 0.4 : 1
-
-        Repeater {
-            model: [
-                { action: "suspend", icon: "moon", label: "Suspend" },
-                { action: "reboot", icon: "rotate-ccw", label: "Restart" },
-                { action: "poweroff", icon: "power", label: "Power off" }
-            ]
-
-            Column {
-                required property var modelData
-                readonly property bool isArmed: surface.armed === modelData.action
-                spacing: 8
-
-                Rectangle {
-                    anchors.horizontalCenter: parent.horizontalCenter
-                    width: 56
-                    height: 56
-                    radius: 28
-                    color: isArmed ? Theme.error
-                         : powerArea.containsMouse ? Theme.alpha(Theme.primary, 0.35) : Theme.alpha(Theme.surface_container, 0.5)
-
-                    LucideIcon {
-                        anchors.centerIn: parent
-                        icon: modelData.icon
-                        size: 22
-                        color: isArmed ? Theme.on_error : "white"
-                    }
-
-                    MouseArea {
-                        id: powerArea
-                        anchors.fill: parent
-                        hoverEnabled: true
-                        cursorShape: surface.preview ? Qt.ArrowCursor : Qt.PointingHandCursor
-                        onClicked: surface.power(modelData.action)
-                    }
-                }
-
-                Text {
-                    anchors.horizontalCenter: parent.horizontalCenter
-                    text: isArmed ? "Click again" : modelData.label
-                    color: "white"
-                    opacity: 0.8
-                    font.family: Theme.font
-                    font.pixelSize: 12
                 }
             }
         }
