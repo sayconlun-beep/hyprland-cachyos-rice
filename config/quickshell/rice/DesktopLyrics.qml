@@ -1,6 +1,7 @@
 // Desktop lyrics, modelled on Nisfere's WallpaperLyrics: the previous line,
 // the current one (bigger, in the accent colour, with a small pop when it
-// advances) and the next, just under the visualiser on every monitor.
+// advances) and the next, centred on every monitor - between the desktop clock
+// above and the visualiser along the bottom edge.
 // Shown only while a track with synced lyrics is playing (LyricsService).
 //
 // BOTTOM layer - on the wallpaper, under windows - and takes no clicks.
@@ -17,10 +18,8 @@ Scope {
     id: root
 
     property bool enabled: true
-    property var visualiser: null                 // lyrics hang below its band
 
     readonly property bool active: enabled && LyricsService.playing && LyricsService.hasLyrics
-    readonly property int gap: 36
     readonly property int bandHeight: 200
 
     function toggle() {
@@ -45,9 +44,7 @@ Scope {
                 left: true
                 right: true
             }
-            margins.top: Math.round(modelData.height / 2
-                                    + (root.visualiser ? root.visualiser.bandHeight / 2 : 180)
-                                    + root.gap)
+            margins.top: Math.round((modelData.height - root.bandHeight) / 2)
             implicitHeight: root.bandHeight
             exclusionMode: ExclusionMode.Ignore
             color: "transparent"
@@ -57,8 +54,7 @@ Scope {
             WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
 
             Column {
-                anchors.horizontalCenter: parent.horizontalCenter
-                anchors.top: parent.top
+                anchors.centerIn: parent
                 width: Math.min(parent.width * 0.7, 1500)
                 spacing: 10
 

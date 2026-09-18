@@ -2,11 +2,13 @@
 # Hyprland settings through rofi. The engines do the real work - validating,
 # applying live and writing conf.d overrides - and also work on their own:
 #   rice-look-ctl.py list|set|reset      rice-monitor-ctl.py list|set|reset
+#   rice-screen-ctl.py list|show|set|reset
 #
 #   rice-settings             choose
 #   rice-settings look        gaps, borders, rounding, opacity, blur, shadow
 #   rice-settings displays    arrange (Quickshell drag panel), or per output:
 #                             mode, scale, VRR, on/off
+#   rice-settings colour      per output: brightness, contrast, saturation, HDR
 set -uo pipefail
 BIN="$HOME/.local/bin"
 
@@ -84,10 +86,68 @@ displays() {
     esac || fail "$out"
 }
 
+# Panel colour, not compositor colour: brightness/contrast/saturation are
+# written to the monitor over DDC/CI, so they hold for games and survive a
+# reboot. HDR is the odd one out - it IS a Hyprland monitor rule - but it
+# belongs in this menu rather than under Displays, because it is the setting
+# that makes a screen look washed out.
+colour() {
+    local sjson conns rows idx conn show keys n key label cur max new out cm
+
+    sjson="$("$BIN/rice-screen-ctl.py" list)" || { fail "rice-screen-ctl.py list failed"; return 1; }
+    mapfile -t conns < <(jq -r '.outputs[] | select(.disabled | not) | .connector' <<< "$sjson")
+    (( ${#conns[@]} )) || { fail "no active outputs"; return 1; }
+    mapfile -t rows < <(jq -r '.outputs[] | select(.disabled | not) | "\(.connector)\t\(.model)\t" +
+        (if (.supported | length) > 0 then (.supported | join(" · "))
+         else "no DDC/CI - check the monitor OSD" end)' <<< "$sjson" | column -t -s $'\t')
+    idx="$(printf '%s\n' "${rows[@]}" | menu "󰃟  colour" -format i)" || return 0
+    [[ -z "$idx" ]] && return 0
+    conn="${conns[$idx]}"
+
+    while :; do
+        # `show` reads the panel live - the OSD buttons can have moved these
+        # behind our back, so they are never cached.
+        show="$("$BIN/rice-screen-ctl.py" show "$conn")" || { fail "cannot read $conn"; return 1; }
+        cm="$("$BIN/rice-monitor-ctl.py" list | jq -r --arg c "$conn" \
+              '.outputs[] | select(.connector == $c) | .configured.cm // "srgb"')"
+        mapfile -t keys < <(jq -r '.values | keys_unsorted[]' <<< "$show")
+        mapfile -t rows < <(jq -r '.values | to_entries[] |
+            "\(.value.label)\t\(.value.value)  /  \(.value.max)"' <<< "$show" | column -t -s $'\t')
+        n=${#keys[@]}
+        (( n )) || { fail "$conn answers no DDC/CI controls"; return 1; }
+        rows+=("HDR                 $([[ "$cm" == srgb ]] && echo off || echo "on  ($cm)")")
+        rows+=("󰑓  Undo my colour changes on $conn")
+        idx="$(printf '%s\n' "${rows[@]}" | menu "$conn" -format i \
+               -mesg "written to the panel itself - kept across reboots")" || return 0
+        [[ -z "$idx" ]] && return 0
+
+        if (( idx < n )); then
+            key="${keys[$idx]}"
+            IFS=$'\t' read -r label cur max < <(jq -r --arg k "$key" \
+                '.values[$k] | [.label, (.value|tostring), (.max|tostring)] | @tsv' <<< "$show")
+            new="$(ask "$label" "now $cur  ·  0 – $max  ·  empty to cancel")" || continue
+            [[ -z "$new" ]] && continue
+            out="$("$BIN/rice-screen-ctl.py" set "$conn" "--$key" "$new" 2>&1)" || fail "$out"
+        elif (( idx == n )); then
+            # Both panels here are ~250-300 nit HDR10, where tone-mapping only
+            # dims the desktop - hence off in hyprland.lua and a toggle here,
+            # for the games that actually ask for it.
+            if [[ "$cm" == srgb ]]; then
+                out="$("$BIN/rice-monitor-ctl.py" set "$conn" --hdr on 2>&1)" || fail "$out"
+            else
+                out="$("$BIN/rice-monitor-ctl.py" set "$conn" --hdr off 2>&1)" || fail "$out"
+            fi
+        else
+            out="$("$BIN/rice-screen-ctl.py" reset "$conn" 2>&1)" || fail "$out"
+        fi
+    done
+}
+
 case "${1:-}" in
     look)     look ;;
     displays) displays ;;
+    colour|color) colour ;;
     *)
-        c="$(printf '%s\n' "󰉼  Look" "󰍹  Displays" | menu "settings" -theme ~/.config/rofi/menu.rasi)" || exit 0
-        case "$c" in *Look) look ;; *Displays) displays ;; esac ;;
+        c="$(printf '%s\n' "󰉼  Look" "󰍹  Displays" "󰃟  Screen colour" | menu "settings" -theme ~/.config/rofi/menu.rasi)" || exit 0
+        case "$c" in *Look) look ;; *Displays) displays ;; *colour) colour ;; esac ;;
 esac

@@ -1,9 +1,12 @@
 # New Rice
 
-A Hyprland desktop themed end to end from the wallpaper. Pick an image and
-[matugen](https://github.com/InioX/matugen) derives a Material You palette
-that the bar, the shell, terminals, GTK and Qt apps, window borders, the lock
-screen and the visualiser all follow - live, no restart.
+A Hyprland desktop themed end to end. Pick one of
+[Omarchy](https://github.com/basecamp/omarchy)'s themes (Tokyo Night,
+Catppuccin, Gruvbox, Rose Pine...) and its exact colours and wallpapers go
+everywhere - or pick any image and [matugen](https://github.com/InioX/matugen)
+derives a Material You palette from it. The bar, the shell, terminals, GTK and
+Qt apps, window borders, the lock screen and the visualiser all follow, live,
+no restart.
 
 It is built from small single-purpose pieces: Waybar for the bar, rofi for
 quick menus, and a [Quickshell](https://quickshell.org) layer for everything
@@ -11,9 +14,13 @@ else.
 
 ## What's in it
 
-- **Wallpaper carousel** (`Super+Shift+W`). Thumbnails with a full-screen
-  preview that cross-fades as you browse; the bar and window borders recolour
-  with it. Enter applies, Esc puts the old one back.
+- **Themes & wallpapers** (`Super+Shift+W`). Omarchy-style: a cover-flow of
+  the themes, then the chosen theme's wallpapers slide in below. Your own
+  wallpapers are sorted into the theme whose colours they match. Enter applies;
+  Esc goes back a step.
+- **Rice menu** (`Super+Space`). One menu for everything, after Omarchy's:
+  Apps, Capture, Style, Settings, Tools, System. Typing searches every level at
+  once. Its entries are a plain file, `config/quickshell/rice/menu.jsonc`.
 - **Dashboard** (`Super+D`, or click the clock). Overview, media with album
   art, 7-day weather, notifications, system gauges, tasks with a focus timer,
   and a GitHub tab for repos, PRs and issues.
@@ -32,7 +39,8 @@ else.
   system settings panel.
 - **On the desktop:** a clock, a cava visualiser and synced lyrics, each
   switchable from the settings hub.
-- **Wallhaven** search and download (`Super+Ctrl+W`).
+- **Wallhaven** search and download (`Super+Ctrl+W`), with a filter for
+  wallpapers that suit a theme.
 - **TTS Reader:** an audiobook-style reader for EPUB, PDF, DOCX and Markdown
   with per-paragraph voices, which can save a book as an `.m4b` for your phone.
 - **Extras:** read-aloud with a subtitle tile, focus mode, Do Not Disturb
@@ -42,9 +50,10 @@ else.
 |-----|------|----------|
 | compositor | Hyprland | `config/hypr` |
 | bar | Waybar | `config/waybar` |
-| launcher, clipboard, session, Wi-Fi menus | rofi + `rice-*` scripts | `config/rofi`, `local/bin` |
+| app launcher, clipboard, session, Wi-Fi menus | rofi + `rice-*` scripts | `config/rofi`, `local/bin` |
 | everything else above | Quickshell (`qs -c rice`) | `config/quickshell/rice` |
 | wallpaper | awww, driven by `rice-wallpaper` | `local/bin` |
+| themes | `rice-theme` (+ `rice-theme-palette`, `rice-theme-match`) | `local/bin`, `~/.config/rice/themes` |
 | palette | matugen | `config/matugen` |
 | idle, lock fallback | hypridle, hyprlock | `config/hypr` |
 
@@ -71,8 +80,8 @@ time, so the clone is your live config. Edit it in place, and `git pull` for
 updates. Anything already in the way is moved aside as
 `<name>.pre-newrice-<date>`; nothing is deleted.
 
-`--apply` also makes a first palette (from `#7dcfff` until you have a
-wallpaper), points btop at the generated theme, sets the GTK, icon and cursor
+`--apply` also makes a first palette (from `#7dcfff` until you pick a theme or
+a wallpaper), points btop at the generated theme, sets the GTK, icon and cursor
 themes, and runs `Hyprland --verify-config`.
 
 To undo it: `./install.sh --uninstall` (dry run), then
@@ -92,9 +101,10 @@ is no longer read: make them again, and they are saved as `conf.d/*.lua`.
 
 ## After installing
 
-1. **Wallpapers.** None are included. Put images in `~/Pictures/Wallpapers`,
-   or search wallhaven with `Super+Ctrl+W`, then choose one with
-   `Super+Shift+W`.
+1. **Themes and wallpapers.** None are included. `rice-theme import-omarchy`
+   fetches Omarchy's 22 themes with their wallpapers (MIT, about 60 MB) into
+   `~/.config/rice/themes`. Put your own images in `~/Pictures/Wallpapers`, or
+   search wallhaven with `Super+Ctrl+W`. Then pick with `Super+Shift+W`.
 2. **Monitors.** Every output starts at its preferred mode. Use
    `Super+Shift+D`, or add `hl.monitor({ ... })` lines in `config/hypr/hyprland.lua`;
    there are examples there.
@@ -110,7 +120,7 @@ is no longer read: make them again, and they are saved as `conf.d/*.lua`.
 
 | key | does |
 |-----|------|
-| `Super+Space` | app launcher |
+| `Super+Space` / `Super+R` | rice menu / plain app launcher (rofi) |
 | `Super+T` / `Super+E` / `Super+B` | terminal / files / browser |
 | `Super+Enter` | Steam |
 | `Super+Q` / `Super+Shift+Q` | close window / exit Hyprland |
@@ -122,7 +132,7 @@ is no longer read: make them again, and they are saved as `conf.d/*.lua`.
 | `Super+N` | notification centre |
 | `Super+,` | settings hub |
 | `Super+/` | keybind cheatsheet and rebinding |
-| `Super+Shift+W` / `Super+Alt+W` / `Super+Ctrl+W` | wallpaper carousel / next wallpaper / search wallhaven |
+| `Super+Shift+W` / `Super+Alt+W` / `Super+Ctrl+W` | themes & wallpapers / next wallpaper in the theme / search wallhaven |
 | `Super+Shift+S` | screenshot and record menu |
 | `Print` / `Shift+Print` | area / whole screen to the clipboard |
 | `Super+Print` / `Ctrl+Print` | area to `~/Pictures` / area into satty |
@@ -152,8 +162,34 @@ rice-wallpaper set <image>
   └─ rice-theme-reload   tells each running app to re-read its colours
 ```
 
-- `rice-wallpaper` also does `next`, `prev`, `random`, `pick` (rofi grid),
+- `rice-wallpaper` also does `next`, `prev`, `random` (within the theme),
   `mode dark|light|toggle` and `theme` (palette only).
+
+**Named themes.** A theme is a folder in `~/.config/rice/themes/<name>/`:
+`colors.toml` (Omarchy's format - accent, mode, background, foreground and the
+terminal colours) and a `backgrounds/` folder. Picking one does not ask matugen
+for a palette: `rice-theme-palette` maps the theme's colours onto the same
+Material roles the templates use and `matugen json` renders them as they are,
+then kitty's and foot's 16 terminal colours are set from the theme. The theme
+called "Wallpaper" is the image-driven path above. To make your own theme, a
+`colors.toml` needs only `accent` and `background` (plus `foreground` and
+`mode = "light"` if it is light) - the rest is derived - and a `backgrounds/`
+folder with at least one image. Or copy an Omarchy theme and change it.
+
+```
+rice-theme set <theme> [image]        rice-theme next | prev | current | list
+rice-theme import-omarchy             fetch Omarchy's themes
+rice-theme sort                       file ~/Pictures/Wallpapers into themes
+rice-theme pin <image> <theme>|auto   keep one image in a theme you choose
+```
+
+- **Your wallpapers join the themes.** `rice-theme-match` reduces each image to
+  its main colours and scores them against every theme; `sort` hardlinks it into
+  the best theme's `backgrounds/` as `mine-<name>` (no extra space). It runs by
+  itself when the panel opens. `rice-theme-match eval` shows how well it does on
+  Omarchy's own wallpapers (about 4 in 5 land in the right theme's top 3).
+- Flip dark/light away from a theme's own mode and it falls back to matugen
+  from the theme's accent.
 - **`--prefer saturation` matters.** Without it, matugen stops to ask which
   colour to use when an image has several, and with no terminal it fails.
 - No template has a `post_hook`: `rice-theme-reload` runs once afterwards
@@ -181,7 +217,8 @@ and scripts:
 
 ```bash
 qs -c rice ipc call <target> <function>
-#   wallpaper      toggle | open | close | apply | next | prev
+#   themes         toggle | open | openWalls | close | next | prev | pick | apply
+#   menu           toggle | open <id> | search <text>
 #   dashboard      toggle | tab <overview|media|weather|alerts|system|productivity|github>
 #   controlcenter  toggle | page <wifi|bluetooth|ethernet|sound>
 #   notifications  toggle | clear | dnd | setDnd <true|false> | toggleDnd
@@ -230,6 +267,8 @@ qs -c rice ipc call <target> <function>
 
 ## Credits
 
+- [Omarchy](https://github.com/basecamp/omarchy) (MIT): the theme picker and
+  menu are modelled on its, and `rice-theme import-omarchy` uses its themes.
 - [Nisfere](https://github.com/Nisfeight8/Nisfere) by Nisfeight8. The
   dashboard, control centre, notifications, OSD, lock screen, capture tools
   and desktop lyrics were modelled on its designs.

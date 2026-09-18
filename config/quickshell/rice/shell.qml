@@ -4,8 +4,10 @@
 //   qs -c rice ipc call capture menu            screenshot / record (Super+Shift+S)
 //   qs -c rice ipc call controlcenter toggle    control centre (network/volume pill)
 //   qs -c rice ipc call notifications toggle    notification centre (Super+N, bell)
+//   qs -c rice ipc call menu toggle             rice menu: apps, capture, style, settings, tools, system (Super+Space)
+//   qs -c rice ipc call themes toggle           themes & wallpapers (Super+Shift+W;
+//                                               `openWalls` starts on the current theme's wallpapers)
 //   qs -c rice ipc call settings toggle         settings hub (bar gear, Super+,)
-//   qs -c rice ipc call wallpaper toggle        carousel (Super+Shift+W)
 //   qs -c rice ipc call wallhaven toggle        wallhaven search + filters (Super+Ctrl+W)
 //   qs -c rice ipc call binds toggle            keybind cheatsheet + editor (Super+/)
 //   qs -c rice ipc call displays toggle         drag screens into place (Settings › Displays)
@@ -24,16 +26,12 @@ import Quickshell.Io
 ShellRoot {
     id: shell
 
-    WallpaperCarousel { id: walls }
     Wallhaven { id: wallhaven }
     Keybinds { id: binds }
     Displays { id: displays }
     Visualiser { id: visualiser }
     DesktopClock { id: clock }
-    DesktopLyrics {
-        id: lyrics
-        visualiser: visualiser
-    }
+    DesktopLyrics { id: lyrics }
     Osd {}
     NotificationPopups {}
     NotificationCenter { id: notifs }
@@ -51,27 +49,34 @@ ShellRoot {
         id: cc
         visualiser: visualiser
     }
-    SettingsMenu {
-        id: settings
+    ThemePicker { id: themes }
+    RiceMenu {
+        id: riceMenu
+        themePicker: themes
         visualiser: visualiser
         clock: clock
         lyrics: lyrics
-        walls: walls
         binds: binds
         displays: displays
         controlCenter: cc
         notifications: notifs
         dashboard: dash
+        capture: capture
         captureMenu: captureMenu
+    }
+    SettingsMenu {
+        id: settings
+        menu: riceMenu
     }
 
     function closeOthers(keep) {
-        if (keep !== walls) walls.cancel()
         if (keep !== wallhaven) wallhaven.close()
         if (keep !== binds) binds.close()
         if (keep !== displays) displays.close()
         if (keep !== cc) cc.close()
         if (keep !== settings) settings.close()
+        if (keep !== riceMenu) riceMenu.close()
+        if (keep !== themes) themes.close()
         if (keep !== notifs) notifs.close()
         if (keep !== dash) dash.close()
         if (keep !== captureMenu) captureMenu.close()
@@ -136,6 +141,46 @@ ShellRoot {
     }
 
     IpcHandler {
+        target: "menu"
+        function toggle(): void { shell.closeOthers(riceMenu); riceMenu.toggle() }
+        // Open at a submenu by id ("style", "tools.dnd"); "" is the top.
+        function open(at: string): void { shell.closeOthers(riceMenu); riceMenu.show(at) }
+        function close(): void { riceMenu.close() }
+        // Open with a search typed in.
+        function search(query: string): void { shell.closeOthers(riceMenu); riceMenu.show(""); riceMenu.query = query }
+        // For checking: "<open|closed> · <path> · <n> rows: <first labels>".
+        function status(): string {
+            const m = riceMenu
+            return `${m.open ? "open" : "closed"} · ${m.path || "top"}${m.query ? " · \"" + m.query + "\"" : ""}`
+                + ` · ${m.rows.length} rows: ${m.rows.slice(0, 8).map(r => r.label + (m.isMenu(r) ? " ›" : "")).join(", ")}`
+                + ` · ${m.items.length} entries, ${m.apps.length} apps` + (m.loadError ? " · " + m.loadError : "")
+        }
+    }
+
+    IpcHandler {
+        target: "themes"
+        // The panel from the start: the themes (Super+Shift+W).
+        function toggle(): void { shell.closeOthers(themes); themes.toggle("themes") }
+        function open(): void { shell.closeOthers(themes); themes.show("themes") }
+        // Straight to step 2, the current theme's wallpapers.
+        function openWalls(): void { shell.closeOthers(themes); themes.show("walls") }
+        function close(): void { themes.close() }
+        function next(): void { themes.step(1) }
+        function prev(): void { themes.step(-1) }
+        function row(which: string): void { themes.row = which }     // "themes" = back to step 1
+        function pick(): void { themes.pickTheme() }                    // step 1 -> 2, like Enter
+        function filter(q: string): void { themes.query = q }
+        function apply(): void { themes.apply() }
+        // For checking: "<open|closed> · <theme> n/m · <row> · <wallpaper> n/m".
+        function status(): string {
+            const t = themes
+            return `${t.open ? "open" : "closed"} · ${t.chosen ? t.chosen.name : "-"} ${t.sel + 1}/${t.shown.length}`
+                + ` · ${t.row} · ${t.wall ? t.wall.name : "-"} ${t.wallSel + 1}/${t.walls.length}`
+                + (t.query ? ` · "${t.query}"` : "")
+        }
+    }
+
+    IpcHandler {
         target: "settings"
         function toggle(): void { shell.closeOthers(settings); settings.toggle() }
         function open(): void { shell.closeOthers(settings); settings.show() }
@@ -169,16 +214,6 @@ ShellRoot {
         function toggle(): void { visualiser.toggle() }
         function show(): void { visualiser.enabled = true }
         function hide(): void { visualiser.enabled = false }
-    }
-
-    IpcHandler {
-        target: "wallpaper"
-        function toggle(): void { shell.closeOthers(walls); walls.toggle() }
-        function open(): void { shell.closeOthers(walls); walls.show() }
-        function close(): void { walls.cancel() }
-        function apply(): void { walls.commit() }
-        function next(): void { walls.step(1) }
-        function prev(): void { walls.step(-1) }
     }
 
     IpcHandler {

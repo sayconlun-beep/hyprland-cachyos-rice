@@ -1,0 +1,174 @@
+// The rice menu (Super+Space, RiceMenu.qml) - modelled on Omarchy's menu.
+// Edit freely: the menu re-reads this file when it changes.
+//
+// Every entry has an `id`. A dotted id puts the entry inside the entry named
+// by the part before the last dot, so "style.theme" lives in "style" and
+// "tools.read.stop" in "tools.read". An entry that has children is a submenu.
+// Entries show in the order they are written here.
+//
+//   icon     a Lucide name from ./icons ("palette"), or a Nerd Font glyph
+//   label    what the row says          hint   the dimmer text after it
+//   run      argv, started detached; a leading ~ is expanded
+//   sh       a shell command line, for pipes and $(...)
+//   action   something inside the shell - see RiceMenu.doAction()
+//   value    a live state pill: visualiser | clock | lyrics | power | mode | recording
+//   keep     stay open after running (for switches that show their value)
+//   confirm  ask for a second Enter first
+//   requires a path that must exist, or the entry is hidden
+//   when     only show while: recording
+//   source   "apps" fills the submenu with every app rofi lists
+//   keywords extra words the search matches
+//
+// The settings hub (bar gear, Super+,) shows the "settings" branch of this
+// file, with each child submenu as one of its sections.
+[
+  // ------------------------------------------------------------------ apps --
+  { "id": "apps", "icon": "layout-grid", "label": "Apps", "hint": "everything rofi lists", "source": "apps" },
+
+  // --------------------------------------------------------------- capture --
+  { "id": "capture", "icon": "camera", "label": "Capture", "hint": "screenshots, recording, replays" },
+  { "id": "capture.screen", "icon": "monitor", "label": "Screenshot screen", "hint": "the focused monitor",
+    "action": "capture.screen" },
+  { "id": "capture.window", "icon": "app-window", "label": "Screenshot window", "hint": "the active window",
+    "action": "capture.window" },
+  { "id": "capture.area", "icon": "crop", "label": "Screenshot area", "hint": "drag a box",
+    "action": "capture.area" },
+  { "id": "capture.record-screen", "icon": "video", "label": "Record screen", "hint": "the focused monitor",
+    "action": "record.screen", "keywords": "video" },
+  { "id": "capture.record-area", "icon": "square-dashed", "label": "Record area", "hint": "drag a box",
+    "action": "record.area", "keywords": "video" },
+  { "id": "capture.stop", "icon": "circle-stop", "label": "Stop recording", "value": "recording",
+    "action": "record.stop", "when": "recording" },
+  { "id": "capture.replay", "icon": "save", "label": "Save replay", "hint": "the last 3 minutes (F8)",
+    "run": ["~/.local/bin/gsr-replay-save"], "keywords": "clip gsr" },
+  { "id": "capture.menu", "icon": "aperture", "label": "Capture panel", "hint": "Super+Shift+S",
+    "action": "capture.menu" },
+
+  // ----------------------------------------------------------------- style --
+  { "id": "style", "icon": "palette", "label": "Style", "hint": "theme, wallpaper, look" },
+  { "id": "style.theme", "icon": "swatch-book", "label": "Themes & wallpapers", "hint": "Super+Shift+W",
+    "action": "themes", "value": "theme", "keywords": "theme wallpaper background colours colors palette" },
+  { "id": "style.next", "icon": "skip-forward", "label": "Next wallpaper", "hint": "Super+Alt+W", "keep": true,
+    "run": ["~/.local/bin/rice-wallpaper", "next"] },
+  { "id": "style.random", "icon": "shuffle", "label": "Random wallpaper", "keep": true,
+    "run": ["~/.local/bin/rice-wallpaper", "random"] },
+  { "id": "style.wallhaven", "icon": "images", "label": "Wallhaven", "hint": "search and download wallpapers",
+    "run": ["~/.local/bin/rice-wallhaven"] },
+  { "id": "style.next-theme", "icon": "palette", "label": "Next theme", "keep": true,
+    "run": ["~/.local/bin/rice-theme", "next"] },
+  { "id": "style.mode", "icon": "sun-moon", "label": "Dark / light", "value": "mode", "keep": true,
+    "action": "mode.toggle", "keywords": "theme" },
+  { "id": "style.look", "icon": "paintbrush", "label": "Look", "hint": "gaps, borders, rounding, blur",
+    "run": ["~/.local/bin/rice-settings", "look"] },
+  { "id": "style.colour", "icon": "sliders-horizontal", "label": "Screen colour",
+    "hint": "brightness, contrast, saturation, HDR", "run": ["~/.local/bin/rice-settings", "colour"] },
+
+  // -------------------------------------------------------------- settings --
+  // Moved here from SettingsMenu.qml; the hub reads this branch.
+  { "id": "settings", "icon": "settings", "label": "Settings", "hint": "every settings panel" },
+
+  { "id": "settings.rice", "icon": "palette", "label": "Rice" },
+  { "id": "settings.rice.dashboard", "icon": "󰕮", "label": "Dashboard", "hint": "media, weather, system, tasks",
+    "action": "dashboard" },
+  { "id": "settings.rice.capture", "icon": "󰄀", "label": "Screenshot & record", "hint": "screen, window or area",
+    "action": "capture.menu" },
+  { "id": "settings.rice.look", "icon": "󰉼", "label": "Look", "hint": "gaps, borders, rounding, blur",
+    "run": ["~/.local/bin/rice-settings", "look"] },
+  { "id": "settings.rice.displays", "icon": "󰍹", "label": "Displays", "hint": "arrange screens by dragging",
+    "action": "displays" },
+  { "id": "settings.rice.modes", "icon": "󰍺", "label": "Display modes", "hint": "resolution, scale, refresh, VRR",
+    "run": ["~/.local/bin/rice-settings", "displays"] },
+  { "id": "settings.rice.colour", "icon": "󰃟", "label": "Screen colour", "hint": "brightness, contrast, saturation, HDR",
+    "run": ["~/.local/bin/rice-settings", "colour"] },
+  { "id": "settings.rice.keybinds", "icon": "󰌌", "label": "Keybinds", "hint": "cheatsheet and rebinding",
+    "action": "keybinds" },
+  { "id": "settings.rice.wallpaper", "icon": "󰸉", "label": "Themes & wallpapers", "hint": "pick a theme, then its wallpaper",
+    "action": "themes" },
+  { "id": "settings.rice.wallhaven", "icon": "󰖟", "label": "Wallhaven", "hint": "search and download wallpapers",
+    "run": ["~/.local/bin/rice-wallhaven"] },
+  { "id": "settings.rice.visualiser", "icon": "󰝚", "label": "Desktop visualiser", "keep": true,
+    "value": "visualiser", "action": "visualiser.toggle" },
+  { "id": "settings.rice.clock", "icon": "󰥔", "label": "Desktop clock", "keep": true,
+    "value": "clock", "action": "clock.toggle" },
+  { "id": "settings.rice.lyrics", "icon": "󰎈", "label": "Desktop lyrics", "keep": true,
+    "value": "lyrics", "action": "lyrics.toggle" },
+
+  { "id": "settings.bar", "icon": "app-window", "label": "Bar & shell" },
+  { "id": "settings.bar.toggle", "icon": "󰍜", "label": "Show / hide the bar",
+    "run": ["pkill", "-USR1", "-x", "waybar"] },
+  { "id": "settings.bar.reload", "icon": "󰑓", "label": "Reload the bar", "hint": "re-read waybar's config and style",
+    "run": ["pkill", "-USR2", "-x", "waybar"] },
+  { "id": "settings.bar.quickshell", "icon": "󰑓", "label": "Reload Quickshell", "hint": "after editing its QML",
+    "action": "shell.reload" },
+
+  { "id": "settings.system", "icon": "monitor", "label": "System" },
+  { "id": "settings.system.cc", "icon": "󰙵", "label": "Control centre", "hint": "Wi-Fi, Bluetooth, theme, night light",
+    "action": "controlcenter" },
+  { "id": "settings.system.sound", "icon": "󰕾", "label": "Sound", "hint": "outputs, inputs, per-app volume",
+    "run": ["pavucontrol"] },
+  { "id": "settings.system.wifi", "icon": "󰖩", "label": "Wi-Fi",
+    "run": ["~/.local/bin/rice-wifi"] },
+  { "id": "settings.system.network", "icon": "󰈀", "label": "Network connections", "hint": "wired, VPN, advanced",
+    "run": ["nm-connection-editor"] },
+  { "id": "settings.system.power", "icon": "󰾅", "label": "Power profile", "keep": true,
+    "value": "power", "action": "power.cycle" },
+  { "id": "settings.system.notifications", "icon": "󰂚", "label": "Notifications", "hint": "history, do not disturb",
+    "action": "notifications" },
+  { "id": "settings.system.gtk", "icon": "󰏘", "label": "GTK appearance", "hint": "theme, icons, cursor, fonts",
+    "run": ["nwg-look"] },
+  { "id": "settings.system.qt", "icon": "󰏘", "label": "Qt appearance", "hint": "Qt apps such as Kate",
+    "run": ["qt6ct"] },
+  { "id": "settings.system.taskmgr", "icon": "󰄨", "label": "Task manager",
+    "run": ["kitty", "--class", "taskmgr", "-e", "btop"] },
+  { "id": "settings.system.session", "icon": "󰐥", "label": "Session", "hint": "lock, log out, reboot, power off",
+    "run": ["~/.local/bin/rice-power"] },
+
+  { "id": "settings.cachyos", "icon": "wrench", "label": "CachyOS" },
+  { "id": "settings.cachyos.hello", "icon": "󰋼", "label": "CachyOS Hello",
+    "run": ["cachyos-hello"] },
+  { "id": "settings.cachyos.pi", "icon": "󰏗", "label": "Package installer",
+    "run": ["cachyos-pi"] },
+  { "id": "settings.cachyos.kernel", "icon": "󰍛", "label": "Kernel manager",
+    "run": ["cachyos-kernel-manager"] },
+  { "id": "settings.cachyos.scx", "icon": "󰘚", "label": "CPU scheduler", "hint": "sched-ext",
+    "run": ["scx-manager"] },
+  { "id": "settings.cachyos.snapshots", "icon": "󰁯", "label": "Snapshots", "hint": "btrfs / snapper",
+    "run": ["btrfs-assistant-launcher"] },
+
+  // ----------------------------------------------------------------- tools --
+  { "id": "tools", "icon": "wrench", "label": "Tools", "hint": "read-aloud, focus, layouts" },
+  { "id": "tools.read", "icon": "speech", "label": "Read aloud", "hint": "piper" },
+  { "id": "tools.read.selection", "icon": "speech", "label": "Read the selection", "hint": "else the clipboard",
+    "run": ["~/.local/bin/read-aloud.sh", "--selection"], "keywords": "tts" },
+  { "id": "tools.read.toggle", "icon": "pause", "label": "Pause / resume reading",
+    "run": ["~/.local/bin/read-aloud.sh", "--toggle"], "keywords": "tts" },
+  { "id": "tools.read.back", "icon": "skip-back", "label": "Back 10 seconds", "keep": true,
+    "run": ["~/.local/bin/read-aloud.sh", "--back"], "keywords": "tts" },
+  { "id": "tools.read.forward", "icon": "skip-forward", "label": "Forward 10 seconds", "keep": true,
+    "run": ["~/.local/bin/read-aloud.sh", "--forward"], "keywords": "tts" },
+  { "id": "tools.read.stop", "icon": "square", "label": "Stop reading",
+    "run": ["~/.local/bin/read-aloud.sh", "--stop"], "keywords": "tts" },
+  { "id": "tools.tts-reader", "icon": "book-audio", "label": "TTS Reader", "hint": "EPUB, PDF, DOCX read aloud",
+    "run": ["~/.local/bin/tts-reader"], "requires": "~/.local/bin/tts-reader", "keywords": "audiobook" },
+  { "id": "tools.focus", "icon": "focus", "label": "Focus mode", "hint": "no bar, wide gaps, no borders",
+    "run": ["~/.local/bin/hypr-focus.sh"], "keywords": "writing zen" },
+  { "id": "tools.clipboard", "icon": "clipboard", "label": "Clipboard history", "hint": "Super+V",
+    "run": ["~/.local/bin/rice-clipboard"] },
+  { "id": "tools.keybinds", "icon": "keyboard", "label": "Keybinds", "hint": "Super+/", "action": "keybinds" },
+  { "id": "tools.dashboard", "icon": "layout-dashboard", "label": "Dashboard", "hint": "Super+D", "action": "dashboard" },
+  { "id": "tools.files", "icon": "folder-open", "label": "Browse files", "hint": "rofi file browser",
+    "run": ["rofi", "-show", "filebrowser", "-theme", "~/.config/rofi/launcher.rasi"] },
+
+  // ---------------------------------------------------------------- system --
+  { "id": "system", "icon": "power", "label": "System", "hint": "lock, suspend, reboot" },
+  { "id": "system.lock", "icon": "lock", "label": "Lock", "run": ["loginctl", "lock-session"] },
+  { "id": "system.suspend", "icon": "moon", "label": "Suspend", "run": ["systemctl", "suspend"], "keywords": "sleep" },
+  { "id": "system.logout", "icon": "log-out", "label": "Log out", "confirm": true,
+    "run": ["hyprctl", "dispatch", "hl.dsp.exit()"] },
+  { "id": "system.reboot", "icon": "rotate-cw", "label": "Reboot", "confirm": true,
+    "run": ["systemctl", "reboot"], "keywords": "restart" },
+  { "id": "system.poweroff", "icon": "power-off", "label": "Shut down", "confirm": true,
+    "run": ["systemctl", "poweroff"], "keywords": "power off" },
+  { "id": "system.taskmgr", "icon": "activity", "label": "Task manager", "hint": "btop",
+    "run": ["kitty", "--class", "taskmgr", "-e", "btop"] },
+]

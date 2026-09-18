@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Copy the current wallpaper and palette to the login screen (noctalia-greeter).
+# Copy the current wallpaper and palette to the login screen: the rice's own
+# (greeter/, via /var/lib/rice-greeter) and noctalia-greeter, the fallback.
 # Noctalia used to do this itself; without it the greeter stays frozen on the
 # last look Noctalia sent it.
 #
@@ -37,10 +38,24 @@ say() {
     return 0
 }
 
-[[ -x "$HELPER" ]] || { (( auto )) || say "noctalia-greeter is not installed"; exit 0; }
-
 wall="$(readlink -f "$CACHE/wallpaper" 2>/dev/null)"
 [[ -f "$wall" ]] || { say "no current wallpaper (~/.cache/rice/wallpaper)"; exit 1; }
+
+# The rice's own login screen (greeter/ in the repo) reads its wallpaper,
+# palette, font and user name from here. The directory is ours, so this needs
+# no root and runs on every wallpaper change.
+RG=/var/lib/rice-greeter
+if [[ -d "$RG" && -w "$RG" ]]; then
+    cp -f -- "$wall" "$RG/wallpaper.tmp" && mv -f -- "$RG/wallpaper.tmp" "$RG/wallpaper"
+    [[ -s "$CACHE/quickshell-colors.json" ]] && cp -f -- "$CACHE/quickshell-colors.json" "$RG/colors.json"
+    for font in InterVariable.ttf JetBrainsMonoNerdFont-Regular.ttf; do
+        [[ -f "$HOME/.local/share/fonts/$font" && ! -f "$RG/$font" ]] && cp -- "$HOME/.local/share/fonts/$font" "$RG/"
+    done
+    [[ "$(cat "$RG/user" 2>/dev/null)" == "$USER" ]] || echo "$USER" > "$RG/user"
+    chmod a+r "$RG"/* 2>/dev/null
+fi
+
+[[ -x "$HELPER" ]] || { (( auto )) || say "noctalia-greeter is not installed"; exit 0; }
 [[ -s "$PALETTE" ]] || { say "no greeter palette yet - run rice-wallpaper theme"; exit 1; }
 mode="$(cat "$CACHE/mode" 2>/dev/null)"
 [[ "$mode" == light ]] || mode=dark

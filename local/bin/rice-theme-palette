@@ -1,0 +1,190 @@
+#!/usr/bin/env python3
+"""A named theme's EXACT colours, for rice-wallpaper.
+
+  rice-theme-palette json <colors.toml> <matugen.json>
+      Print matugen-format JSON (`matugen json` renders it verbatim) with the
+      Material roles the templates use filled from Omarchy's colors.toml.
+      <matugen.json> is matugen's own dry run for the accent: it supplies every
+      role not mapped here, so no template ever finds a hole.
+
+  rice-theme-palette terminal <colors.toml>
+      Overwrite the 16 ANSI colours in kitty's and foot's generated colour files
+      with the theme's own, the way Omarchy's kitty/foot templates map them
+      (color0 background, 1-6 red..cyan, 7 foreground, 8 muted, 9-15 bright).
+      The Material roles have no slot for these.
+
+Only for a theme shown in its own mode: rice-wallpaper falls back to matugen
+from the accent when dark/light is flipped away from it.
+"""
+import colorsys
+import json
+import os
+import re
+import sys
+import tomllib
+
+
+def rgb(h):
+    h = h.lstrip("#")
+    return tuple(int(h[i:i + 2], 16) / 255 for i in (0, 2, 4))
+
+
+def hexs(c):
+    return "#" + "".join(f"{round(max(0, min(1, v)) * 255):02x}" for v in c)
+
+
+def mix(a, b, t):
+    """t of b into a."""
+    a, b = rgb(a), rgb(b)
+    return hexs(tuple(x + (y - x) * t for x, y in zip(a, b)))
+
+
+def lum(h):
+    def lin(v):
+        return v / 12.92 if v <= 0.04045 else ((v + 0.055) / 1.055) ** 2.4
+    r, g, b = (lin(v) for v in rgb(h))
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def contrast(a, b):
+    la, lb = sorted((lum(a), lum(b)), reverse=True)
+    return (la + 0.05) / (lb + 0.05)
+
+
+def best_on(bg, *choices):
+    return max(choices, key=lambda c: contrast(bg, c))
+
+
+def hue_sat(h):
+    hh, l, s = colorsys.rgb_to_hls(*rgb(h))
+    return hh * 360, s
+
+
+def hue_gap(a, b):
+    d = abs(hue_sat(a)[0] - hue_sat(b)[0]) % 360
+    return min(d, 360 - d)
+
+
+def fill(t):
+    """Omarchy's colors.toml has ~25 keys; a home-made theme may have only
+    accent + background (+ foreground, mode). Derive the rest."""
+    t = dict(t)
+    dark = t.get("mode", "dark") != "light"
+    bg = t["background"]
+    fg = t.setdefault("foreground", "#c0caf5" if dark else "#343b58")
+    black = "#000000"
+    defaults = {
+        "selection": mix(bg, fg, 0.15), "muted": mix(bg, fg, 0.35),
+        "dark_background": mix(bg, black, 0.25 if dark else 0.05),
+        "darker_background": mix(bg, black, 0.45 if dark else 0.1),
+        "lighter_background": mix(bg, fg, 0.08),
+        "dark_foreground": mix(fg, bg, 0.4), "light_foreground": fg, "bright_foreground": fg,
+        "red": "#e06c75", "green": "#98c379", "yellow": "#e5c07b", "blue": t["accent"],
+        "magenta": "#c678dd", "cyan": "#56b6c2",
+    }
+    for k, v in defaults.items():
+        t.setdefault(k, v)
+    for k in ("red", "green", "yellow", "blue", "magenta", "cyan"):
+        t.setdefault("bright_" + k, t[k])
+    return t
+
+
+def roles(t):
+    dark = t.get("mode", "dark") != "light"
+    bg, fg = t["background"], t["foreground"]
+    acc = t["accent"]
+    white, black = "#ffffff", "#000000"
+
+    # Secondary / tertiary: the palette's hues nearest the accent's, skipping
+    # the accent's own (Tokyo Night: accent blue -> cyan, magenta).
+    names = ["blue", "cyan", "magenta", "green", "yellow", "orange", "red"]
+    cands = [t[n] for n in names if n in t and hue_gap(t[n], acc) > 12]
+    cands.sort(key=lambda c: hue_gap(c, acc))
+    sec = cands[0] if cands else t.get("cyan", acc)
+    ter = cands[1] if len(cands) > 1 else t.get("magenta", acc)
+
+    r = {}
+    for name, c in (("primary", acc), ("secondary", sec), ("tertiary", ter), ("error", t["red"])):
+        cont = mix(bg, c, 0.3)
+        r[name] = c
+        r[f"on_{name}"] = best_on(c, bg, fg, black, white)
+        r[f"{name}_container"] = cont
+        r[f"on_{name}_container"] = best_on(cont, fg, t["bright_foreground"], c)
+        r[f"{name}_fixed"] = mix(c, white, 0.45)
+        r[f"{name}_fixed_dim"] = c
+        r[f"on_{name}_fixed"] = black
+        r[f"on_{name}_fixed_variant"] = mix(c, black, 0.6)
+
+    if dark:   # containers climb towards the light
+        lowest, low = t["darker_background"], t["dark_background"]
+        mid, high, highest = mix(bg, t["lighter_background"], 0.5), t["lighter_background"], t["selection"]
+    else:      # containers sink towards the dark; "lowest" is the brightest
+        lowest, low = mix(bg, white, 0.5), mix(bg, t["dark_background"], 0.5)
+        mid, high, highest = t["dark_background"], t["darker_background"], t["selection"]
+
+    r.update({
+        "background": bg, "on_background": fg,
+        "surface": bg, "on_surface": fg,
+        "surface_dim": t["dark_background"] if dark else t["darker_background"],
+        "surface_bright": t["selection"] if dark else mix(bg, white, 0.5),
+        "surface_container_lowest": lowest, "surface_container_low": low,
+        "surface_container": mid, "surface_container_high": high,
+        "surface_container_highest": highest,
+        "surface_variant": high, "on_surface_variant": mix(fg, bg, 0.22),
+        "outline": t["dark_foreground"], "outline_variant": t["muted"],
+        "inverse_surface": fg, "inverse_on_surface": bg, "inverse_primary": mix(acc, bg, 0.4),
+        "surface_tint": acc, "source_color": acc,
+        "shadow": black, "scrim": black,
+    })
+    return r
+
+
+def cmd_json(toml_path, fallback_path):
+    with open(toml_path, "rb") as f:
+        t = fill(tomllib.load(f))
+    with open(fallback_path) as f:
+        out = json.load(f)
+    mode = "light" if t.get("mode") == "light" else "dark"
+    for role, c in roles(t).items():
+        slot = out["colors"].setdefault(role, {})
+        for k in ("default", mode):
+            slot[k] = {"color": c}
+    out["mode"] = mode
+    out["is_dark_mode"] = mode == "dark"
+    json.dump(out, sys.stdout)
+
+
+def cmd_terminal(toml_path):
+    with open(toml_path, "rb") as f:
+        t = fill(tomllib.load(f))
+    ansi = [t["background"], t["red"], t["green"], t["yellow"], t["blue"], t["magenta"], t["cyan"],
+            t["foreground"], t["muted"], t["bright_red"], t["bright_green"], t["bright_yellow"],
+            t["bright_blue"], t["bright_magenta"], t["bright_cyan"], t["bright_foreground"]]
+    conf = os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config"))
+    edits = {
+        f"{conf}/kitty/colors.conf": [(rf"^color{i}\s+\S+", f"color{i}  {c}") for i, c in enumerate(ansi)]
+            + [(r"^selection_background\s+\S+", "selection_background " + t["selection"]),
+               (r"^selection_foreground\s+\S+", "selection_foreground " + t["foreground"])],
+        f"{conf}/foot/colors.ini": [(rf"^{'regular' if i < 8 else 'bright'}{i % 8}=\S+",
+                                     f"{'regular' if i < 8 else 'bright'}{i % 8}={c.lstrip('#')}")
+                                    for i, c in enumerate(ansi)],
+    }
+    for path, subs in edits.items():
+        try:
+            with open(path) as f:
+                s = f.read()
+        except FileNotFoundError:
+            continue
+        for pat, rep in subs:
+            s = re.sub(pat, rep, s, flags=re.M)
+        with open(path, "w") as f:
+            f.write(s)
+
+
+if __name__ == "__main__":
+    if len(sys.argv) == 4 and sys.argv[1] == "json":
+        cmd_json(sys.argv[2], sys.argv[3])
+    elif len(sys.argv) == 3 and sys.argv[1] == "terminal":
+        cmd_terminal(sys.argv[2])
+    else:
+        sys.exit(__doc__)

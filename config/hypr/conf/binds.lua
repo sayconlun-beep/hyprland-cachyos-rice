@@ -20,7 +20,8 @@ bind("SUPER + C",              exec(bin .. "/open-chess.sh"))     -- chess.com, 
 bind("SUPER + SHIFT + C",      exec("gnome-chess"))               -- offline chess against the GNU Chess bot
 bind("SUPER + T",              exec(term))
 bind("CTRL + ALT + DELETE",    exec(term .. " --class taskmgr -e btop"))
-bind("SUPER + SPACE",          exec("rofi -show drun -theme ~/.config/rofi/launcher.rasi"))
+bind("SUPER + SPACE",          exec("qs -c rice ipc call menu toggle"))              -- rice menu: apps, capture, style, settings, tools, system
+bind("SUPER + R",              exec("rofi -show drun -theme ~/.config/rofi/launcher.rasi"))   -- plain app launcher
 bind("SUPER + SHIFT + SPACE",  exec("rofi -show filebrowser -theme ~/.config/rofi/launcher.rasi"))
 bind("CTRL + SHIFT + SPACE",   exec("rofi -show filebrowser -theme ~/.config/rofi/launcher.rasi"))
 bind("SUPER + E",              exec(files))
@@ -36,15 +37,16 @@ bind("SUPER + V",              exec(bin .. "/rice-clipboard"))
 bind("SUPER + N",              exec("qs -c rice ipc call notifications toggle"))   -- notification centre
 bind("SUPER + X",              exec(bin .. "/rice-power"))
 bind("SUPER + ESCAPE",         exec("loginctl lock-session"))           -- hypridle locks (Quickshell, else hyprlock)
-bind("SUPER + SHIFT + W",      exec("qs -c rice ipc call wallpaper toggle"))       -- carousel
+bind("SUPER + SHIFT + W",      exec("qs -c rice ipc call themes toggle"))          -- themes & wallpapers panel
 bind("SUPER + slash",          exec("qs -c rice ipc call binds toggle"))           -- cheatsheet + rebinding
 bind("SUPER + comma",          exec("qs -c rice ipc call settings toggle"))        -- settings hub
 bind("SUPER + D",              exec("qs -c rice ipc call dashboard toggle"))       -- dashboard
 bind("SUPER + SHIFT + S",      exec("qs -c rice ipc call capture menu"))           -- screenshot / record
-bind("SUPER + ALT + W",        exec(bin .. "/rice-wallpaper next"))
+bind("SUPER + ALT + W",        exec(bin .. "/rice-wallpaper next"))     -- next wallpaper in the theme
 bind("SUPER + CTRL + W",       exec(bin .. "/rice-wallhaven"))
 bind("SUPER + SHIFT + D",      exec(bin .. "/rice-settings displays"))
 bind("SUPER + SHIFT + A",      exec(bin .. "/rice-settings look"))      -- SUPER + A alone is togglesplit
+bind("SUPER + SHIFT + G",      exec(bin .. "/rice-settings colour"))    -- G for gamma: SHIFT + C is gnome-chess
 bind("SUPER + SHIFT + B",      exec("pkill -USR1 -x waybar"))           -- hide/show the bar
 bind("SUPER + SHIFT + V",      exec("qs -c rice ipc call visualiser toggle"))      -- desktop visualiser
 

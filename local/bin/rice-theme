@@ -1,0 +1,173 @@
+#!/usr/bin/env bash
+# Named themes, Omarchy-style. A theme is a folder in ~/.config/rice/themes:
+#
+#   <name>/colors.toml     accent = "#rrggbb" and mode = "dark" | "light"
+#                          plus Omarchy's full palette (background, foreground,
+#                          red..magenta, bright_*), which is used EXACTLY
+#   <name>/backgrounds/    its wallpapers
+#
+# Picking one fills the usual templates with the theme's own colours
+# (rice-theme-palette + `matugen json`) and shows one of its wallpapers;
+# rice-theme-reload does the rest. Flip dark/light away from the theme's own
+# mode and it falls back to matugen from the accent (optional
+# matugen_scheme = "scheme-...", default scheme-fidelity). The special theme
+# "wallpaper" colours from the picture on screen, any image in
+# ~/Pictures/Wallpapers. Picking both is ThemePicker.qml (Super+Shift+W).
+#
+#   rice-theme list [--json [--walls]]   every theme; * marks the current one
+#                                (--json: the picker's catalog, from
+#                                rice-theme-match; --walls adds each theme's
+#                                wallpapers and their thumbnails)
+#   rice-theme current
+#   rice-theme set <name> [file] or `set wallpaper [file]`; <file> picks the
+#                                wallpaper (else the one the theme had last)
+#   rice-theme pin <file> <name> file a wallpaper under a theme for good
+#                                (`auto` hands it back to the colour matcher)
+#   rice-theme next | prev       cycle through the themes
+#   rice-theme import-omarchy    fetch Omarchy's themes (MIT) into the folder
+#   rice-theme sort [--quiet]    file every wallpaper in ~/Pictures/Wallpapers
+#                                into the theme whose colours it matches
+#                                (rice-theme-match; hardlinks named mine-*).
+#                                Also runs by itself when a wallpaper from the
+#                                collection is set and when the picker opens.
+#
+# The work of showing and re-theming is rice-wallpaper's: it reads the active
+# theme from ~/.cache/rice/theme and gives a file in that theme's backgrounds/
+# the theme's colours. Showing any other file (from the collection, Wallhaven
+# without a Theme filter) goes back to the "wallpaper" theme.
+set -uo pipefail
+
+THEMES="${RICE_THEMES_DIR:-$HOME/.config/rice/themes}"
+CACHE="$HOME/.cache/rice"
+BIN="$HOME/.local/bin"
+mkdir -p "$CACHE" "$THEMES"
+
+die() { echo "rice-theme: $*" >&2; notify-send -a rice-theme "Theme" "$*" 2>/dev/null; exit 1; }
+
+toml_get() { grep -oP "^$1\\s*=\\s*\"\\K[^\"]+" "$2" 2>/dev/null | head -n1; }
+
+current() { local t; t="$(cat "$CACHE/theme" 2>/dev/null)"; [[ -n "$t" && -f "$THEMES/$t/colors.toml" ]] && echo "$t" || echo wallpaper; }
+
+names() {
+    echo wallpaper
+    local d
+    for d in "$THEMES"/*/; do
+        [[ -f "$d/colors.toml" ]] && basename "$d"
+    done | sort
+}
+
+pretty() {   # tokyo-night -> Tokyo Night
+    [[ "$1" == wallpaper ]] && { echo "Wallpaper"; return; }
+    sed -E 's/[-_]+/ /g; s/\b(.)/\u\1/g' <<< "$1"
+}
+
+backgrounds() {
+    find -L "$THEMES/$1/backgrounds" -maxdepth 1 -type f \( -iname '*.jpg' -o -iname '*.jpeg' \
+        -o -iname '*.png' -o -iname '*.webp' \) 2>/dev/null | sort
+}
+
+set_theme() {
+    local name="$1" f="${2:-}"
+    if [[ -n "$f" ]]; then
+        f="$(readlink -f -- "$f")"
+        [[ -f "$f" ]] || die "no such wallpaper: $2"
+    fi
+    if [[ "$name" == wallpaper ]]; then
+        [[ "$(current)" == wallpaper ]] || {
+            rm -f "$CACHE/theme"
+            # the dark/light choice the wallpaper theme had before
+            [[ -s "$CACHE/mode-wallpaper" ]] && cp "$CACHE/mode-wallpaper" "$CACHE/mode"
+        }
+        [[ -f "$f" ]] || f="$(cat "$CACHE/wallpaper-last" 2>/dev/null)"
+        [[ -f "$f" ]] || f="$(find -L "${RICE_WALLPAPER_DIR:-$HOME/Pictures/Wallpapers}" -maxdepth 1 -type f | sort | head -n1)"
+        [[ -f "$f" ]] || die "no wallpaper to go back to"
+        exec "$BIN/rice-wallpaper" set "$f"
+    fi
+
+    local dir="$THEMES/$name"
+    [[ -f "$dir/colors.toml" ]] || die "no theme called $name (in $THEMES)"
+    [[ -n "$(toml_get accent "$dir/colors.toml")" ]] || die "$name/colors.toml has no accent"
+
+    # the one asked for if it is the theme's, else the last shown, else the first
+    [[ -n "$f" && "$f" == "$(readlink -f -- "$dir/backgrounds")"/* ]] || f=""
+    [[ -f "$f" ]] || f="$(cat "$CACHE/theme-bg/$name" 2>/dev/null)"
+    [[ -f "$f" ]] || f="$(backgrounds "$name" | head -n1)"
+    [[ -f "$f" ]] || die "$name has no backgrounds/"
+
+    if [[ "$(current)" == wallpaper ]]; then
+        cp "$CACHE/mode" "$CACHE/mode-wallpaper" 2>/dev/null
+    fi
+    printf '%s\n' "$name" > "$CACHE/theme"
+    mode="$(toml_get mode "$dir/colors.toml")"
+    [[ "$mode" == light ]] || mode=dark
+    printf '%s\n' "$mode" > "$CACHE/mode"
+    exec "$BIN/rice-wallpaper" set "$f"
+}
+
+import_omarchy() {
+    local src="$CACHE/omarchy-src" t n=0
+    if [[ -d "$src/.git" ]]; then
+        git -C "$src" pull -q --depth 1 || die "could not update $src"
+    else
+        rm -rf "$src"
+        git clone -q --depth 1 --filter=blob:none --sparse https://github.com/basecamp/omarchy.git "$src" \
+            && git -C "$src" sparse-checkout set themes \
+            || die "could not fetch github.com/basecamp/omarchy"
+    fi
+    for t in "$src"/themes/*/; do
+        t="${t%/}"
+        [[ -f "$t/colors.toml" ]] || continue
+        mkdir -p "$THEMES/${t##*/}"
+        cp -f "$t/colors.toml" "$THEMES/${t##*/}/"
+        [[ -f "$t/preview.png" ]] && cp -f "$t/preview.png" "$THEMES/${t##*/}/"
+        [[ -d "$t/backgrounds" ]] && cp -rf "$t/backgrounds" "$THEMES/${t##*/}/"
+        n=$((n + 1))
+    done
+    cp -f "$src/LICENSE" "$THEMES/OMARCHY-LICENSE"
+    printf 'The themes marked with colors.toml + backgrounds/ copied by `rice-theme import-omarchy`\ncome from https://github.com/basecamp/omarchy (MIT, see OMARCHY-LICENSE).\n' > "$THEMES/CREDITS"
+    echo "imported $n themes into $THEMES"
+}
+
+case "${1:-}" in
+    list)
+        if [[ "${2:-}" == --json ]]; then
+            exec "$BIN/rice-theme-match" catalog ${3:+"$3"}
+        fi
+        cur="$(current)"
+        names | while read -r t; do
+            [[ "$t" == "$cur" ]] && printf '* ' || printf '  '
+            pretty "$t"
+        done
+        ;;
+    current)
+        current
+        ;;
+    set)
+        [[ -n "${2:-}" ]] || die "usage: rice-theme set <name>|wallpaper [file]"
+        set_theme "$2" "${3:-}"
+        ;;
+    next|prev)
+        mapfile -t all < <(names)
+        cur="$(current)"
+        for i in "${!all[@]}"; do [[ "${all[$i]}" == "$cur" ]] && break; done
+        n=${#all[@]}
+        [[ "$1" == next ]] && i=$(( (i + 1) % n )) || i=$(( (i - 1 + n) % n ))
+        set_theme "${all[$i]}"
+        ;;
+    import-omarchy)
+        import_omarchy
+        "$BIN/rice-theme-match" sort
+        ;;
+    pin)
+        [[ -n "${2:-}" && -n "${3:-}" ]] || die "usage: rice-theme pin <file> <name>|auto"
+        exec flock "$CACHE/wallsort.lock" "$BIN/rice-theme-match" pin "$2" "$3"
+        ;;
+    sort)
+        # one sort at a time: the picker and a wallpaper change can both start one
+        exec flock -n "$CACHE/wallsort.lock" "$BIN/rice-theme-match" sort ${2:+"$2"}
+        ;;
+    *)
+        sed -n '2,/^$/s/^# \{0,1\}//p' "$0"
+        exit 2
+        ;;
+esac

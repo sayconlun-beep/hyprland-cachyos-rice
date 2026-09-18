@@ -61,19 +61,26 @@ Item {
         visible: false
     }
 
+    // A light blur, so the wallpaper still reads as itself, and a scrim that
+    // is darker only where the text sits (top clock, bottom power row).
     MultiEffect {
         anchors.fill: parent
         source: wallpaper
         blurEnabled: true
-        blur: 1.0
-        blurMax: 64
-        brightness: -0.2
-        saturation: 0.1
+        blur: 0.3
+        blurMax: 40
+        brightness: -0.05
+        saturation: 0.15
     }
 
     Rectangle {
         anchors.fill: parent
-        color: Qt.rgba(0, 0, 0, 0.35)
+        gradient: Gradient {
+            GradientStop { position: 0.0; color: Qt.rgba(0, 0, 0, 0.30) }
+            GradientStop { position: 0.35; color: Qt.rgba(0, 0, 0, 0.12) }
+            GradientStop { position: 0.7; color: Qt.rgba(0, 0, 0, 0.18) }
+            GradientStop { position: 1.0; color: Qt.rgba(0, 0, 0, 0.50) }
+        }
     }
 
     MouseArea {
@@ -81,73 +88,76 @@ Item {
         onClicked: input.forceActiveFocus()
     }
 
+    // --------------------------------------------------------------- clock --
+    // The desktop clock (DesktopClock.qml), in the same place and style.
+    Item {
+        anchors.fill: parent
+
+        layer.enabled: true
+        layer.effect: MultiEffect {
+            shadowEnabled: true
+            shadowColor: Qt.rgba(0, 0, 0, 0.55)
+            shadowBlur: 0.9
+            shadowVerticalOffset: 3
+        }
+
+        Column {
+            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.top: parent.top
+            anchors.topMargin: Math.round(surface.height * 0.12) + 10
+            spacing: 2
+
+            Text {
+                anchors.horizontalCenter: parent.horizontalCenter
+                text: Qt.formatDate(surface.now, "dddd, MMMM d, yyyy")
+                color: Theme.on_surface
+                opacity: 0.65
+                font.family: Theme.mono
+                font.pixelSize: 20
+            }
+
+            Row {
+                anchors.horizontalCenter: parent.horizontalCenter
+                spacing: 8
+
+                Text {
+                    id: bigTime
+                    text: Qt.formatTime(surface.now, "h:mm:ss")
+                    color: Theme.primary
+                    font.family: Theme.font
+                    font.pixelSize: 96
+                    font.weight: Font.Light
+                    font.features: { "tnum": 1 }
+                }
+
+                Text {
+                    anchors.baseline: bigTime.baseline
+                    text: Qt.formatTime(surface.now, "AP")
+                    color: Theme.primary
+                    opacity: 0.7
+                    font.family: Theme.font
+                    font.pixelSize: 23
+                }
+            }
+        }
+    }
+
     // ------------------------------------------------------------- content --
+    // Username and password, sitting just above the power buttons.
     ColumnLayout {
-        anchors.centerIn: parent
+        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.bottom: powerRow.top
+        anchors.bottomMargin: 28
         width: 440
-        spacing: 16
+        spacing: 12
 
-        Row {
-            Layout.alignment: Qt.AlignHCenter
-            spacing: 10
-
-            Text {
-                id: bigTime
-                text: Qt.formatTime(surface.now, "h:mm")
-                color: "white"
-                font.family: Theme.font
-                font.pixelSize: 120
-                font.weight: Font.Bold
-                font.features: { "tnum": 1 }
-            }
-
-            Text {
-                anchors.baseline: bigTime.baseline
-                text: Qt.formatTime(surface.now, "AP")
-                color: "white"
-                opacity: 0.75
-                font.family: Theme.font
-                font.pixelSize: 28
-                font.weight: Font.DemiBold
-            }
-        }
-
-        Text {
-            Layout.alignment: Qt.AlignHCenter
-            text: Qt.formatDate(surface.now, "dddd, d MMMM")
-            color: "white"
-            opacity: 0.8
-            font.family: Theme.font
-            font.pixelSize: 22
-        }
-
-        Item { Layout.preferredHeight: 26 }
-
-        ClippingRectangle {
-            Layout.alignment: Qt.AlignHCenter
-            implicitWidth: 96
-            implicitHeight: 96
-            radius: 48
-            color: Theme.alpha(Theme.surface_container, 0.85)
-            border.width: 2
-            border.color: Theme.primary
-
-            Image {
-                id: face
-                anchors.fill: parent
-                source: "file://" + surface.home + "/.face"
-                fillMode: Image.PreserveAspectCrop
-                asynchronous: true
-                visible: status === Image.Ready
-            }
-
-            LucideIcon {
-                anchors.centerIn: parent
-                visible: face.status !== Image.Ready
-                icon: "user"
-                size: 44
-                color: "white"
-            }
+        layer.enabled: true
+        layer.effect: MultiEffect {
+            shadowEnabled: true
+            shadowColor: "black"
+            shadowOpacity: 0.55
+            shadowBlur: 0.9
+            shadowVerticalOffset: 2
         }
 
         Text {
@@ -155,20 +165,19 @@ Item {
             text: Quickshell.env("USER") || ""
             color: "white"
             font.family: Theme.font
-            font.pixelSize: 22
-            font.weight: Font.Bold
+            font.pixelSize: 17
+            font.weight: Font.DemiBold
         }
 
         Rectangle {
             id: field
             Layout.alignment: Qt.AlignHCenter
             implicitWidth: 360
-            implicitHeight: 56
-            radius: 28
-            color: Theme.alpha(Theme.surface_container, 0.85)
+            implicitHeight: 52
+            radius: 10
+            color: Theme.alpha(Theme.surface_container, 0.55)
             border.width: 2
-            border.color: surface.lock && surface.lock.error ? Theme.error
-                        : input.activeFocus ? Theme.primary : Theme.alpha(Theme.outline_variant, 0.8)
+            border.color: surface.lock && surface.lock.error ? Theme.error : Theme.primary
             Behavior on border.color {
                 ColorAnimation { duration: 150 }
             }
@@ -187,7 +196,7 @@ Item {
             RowLayout {
                 anchors.fill: parent
                 anchors.leftMargin: 22
-                anchors.rightMargin: 8
+                anchors.rightMargin: 7
                 spacing: 12
 
                 LucideIcon {
@@ -230,9 +239,9 @@ Item {
                 }
 
                 Rectangle {
-                    implicitWidth: 40
-                    implicitHeight: 40
-                    radius: 20
+                    implicitWidth: 38
+                    implicitHeight: 38
+                    radius: 7
                     color: Theme.primary
 
                     LucideIcon {
@@ -281,15 +290,33 @@ Item {
             font.pixelSize: 13
         }
 
+    }
+
+    // ------------------------------------------------------ bottom right --
+    // What's playing and what Steam is downloading.
+    ColumnLayout {
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        anchors.margins: 40
+        spacing: 12
+
+        layer.enabled: true
+        layer.effect: MultiEffect {
+            shadowEnabled: true
+            shadowColor: "black"
+            shadowOpacity: 0.55
+            shadowBlur: 0.9
+            shadowVerticalOffset: 2
+        }
+
         // What's playing
         Rectangle {
-            Layout.alignment: Qt.AlignHCenter
-            Layout.topMargin: 10
+            Layout.alignment: Qt.AlignRight
             visible: MediaState.player !== null
             implicitWidth: Math.min(nowRow.implicitWidth + 30, 440)
             implicitHeight: 48
-            radius: 24
-            color: Theme.alpha(Theme.surface_container, 0.7)
+            radius: 10
+            color: Theme.alpha(Theme.surface_container, 0.5)
 
             RowLayout {
                 id: nowRow
@@ -322,10 +349,114 @@ Item {
                 }
             }
         }
+        // What Steam is downloading
+        Rectangle {
+            Layout.alignment: Qt.AlignRight
+            visible: SteamDownloads.active
+            implicitWidth: 440
+            implicitHeight: 84
+            radius: 20
+            color: Theme.alpha(Theme.surface_container, 0.5)
+            border.width: 1
+            border.color: Theme.alpha(Theme.primary, 0.25)
+
+            RowLayout {
+                anchors.fill: parent
+                anchors.margins: 12
+                spacing: 14
+
+                ClippingRectangle {
+                    implicitWidth: 128
+                    implicitHeight: 60
+                    radius: 10
+                    color: Theme.alpha(Theme.primary, 0.15)
+
+                    Image {
+                        id: steamArt
+                        anchors.fill: parent
+                        source: SteamDownloads.art ? "file://" + SteamDownloads.art : ""
+                        fillMode: Image.PreserveAspectCrop
+                        asynchronous: true
+                        sourceSize.width: 256
+                        visible: status === Image.Ready
+                    }
+
+                    LucideIcon {
+                        anchors.centerIn: parent
+                        visible: steamArt.status !== Image.Ready
+                        icon: "download"
+                        size: 22
+                        color: Theme.primary
+                    }
+                }
+
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 6
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+
+                        Text {
+                            Layout.fillWidth: true
+                            text: SteamDownloads.name
+                            elide: Text.ElideRight
+                            color: "white"
+                            font.family: Theme.font
+                            font.pixelSize: 14
+                            font.weight: Font.DemiBold
+                        }
+
+                        Text {
+                            text: SteamDownloads.status === "Downloading"
+                                  ? Math.floor(SteamDownloads.progress * 100) + "%"
+                                  : SteamDownloads.status
+                            color: Theme.primary
+                            font.family: Theme.font
+                            font.pixelSize: 14
+                            font.weight: Font.Bold
+                            font.features: { "tnum": 1 }
+                        }
+                    }
+
+                    Rectangle {
+                        Layout.fillWidth: true
+                        implicitHeight: 6
+                        radius: 3
+                        color: Theme.alpha("white", 0.15)
+
+                        Rectangle {
+                            width: parent.width * SteamDownloads.progress
+                            height: parent.height
+                            radius: 3
+                            color: Theme.primary
+                            Behavior on width {
+                                NumberAnimation { duration: 600; easing.type: Easing.OutCubic }
+                            }
+                        }
+                    }
+
+                    Text {
+                        Layout.fillWidth: true
+                        text: [SteamDownloads.rate > 0 && SteamDownloads.status === "Downloading"
+                                   ? (SteamDownloads.rate / 8).toFixed(1) + " MB/s" : "",
+                               SteamDownloads.etaText].filter(x => x).join("  ·  ") || "Steam"
+                        elide: Text.ElideRight
+                        color: "white"
+                        opacity: 0.7
+                        font.family: Theme.font
+                        font.pixelSize: 12
+                        font.features: { "tnum": 1 }
+                    }
+                }
+            }
+        }
     }
 
     // ---------------------------------------------------------------- power --
     Row {
+        id: powerRow
         anchors.horizontalCenter: parent.horizontalCenter
         anchors.bottom: parent.bottom
         anchors.bottomMargin: 50
@@ -350,7 +481,7 @@ Item {
                     height: 56
                     radius: 28
                     color: isArmed ? Theme.error
-                         : powerArea.containsMouse ? Theme.alpha(Theme.primary, 0.35) : Theme.alpha(Theme.surface_container, 0.7)
+                         : powerArea.containsMouse ? Theme.alpha(Theme.primary, 0.35) : Theme.alpha(Theme.surface_container, 0.5)
 
                     LucideIcon {
                         anchors.centerIn: parent

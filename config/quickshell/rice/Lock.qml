@@ -31,6 +31,13 @@ Scope {
 
     signal failed
 
+    // Poll Steam only while the lock screen is up.
+    Binding {
+        target: SteamDownloads
+        property: "watched"
+        value: root.locked || root.previewing
+    }
+
     function lock() {
         if (locked)
             return

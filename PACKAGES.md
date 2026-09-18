@@ -11,7 +11,7 @@ sudo pacman -S --needed \
   waybar rofi awww matugen quickshell \
   kitty grim slurp satty wl-clipboard cliphist brightnessctl playerctl wireplumber \
   pavucontrol nm-connection-editor hyprsunset gpu-screen-recorder \
-  jq curl socat imagemagick libnotify python python-gobject gtk-layer-shell \
+  jq curl git socat imagemagick libnotify python python-gobject python-numpy python-pillow gtk-layer-shell \
   cava fastfetch btop thunar tumbler gvfs upower power-profiles-daemon github-cli \
   adw-gtk-theme qt6ct nwg-look papirus-icon-theme ttf-jetbrains-mono-nerd inter-font
 ```
@@ -24,10 +24,12 @@ Plus `bibata-cursor-theme-bin` from the AUR, or change `XCURSOR_THEME` in
 | package | used by |
 |---------|---------|
 | `hyprland` 0.53+ | the compositor - the configs use the named `windowrule { }` blocks |
-| `quickshell` 0.3 | dashboard, control centre, notifications, OSD, lock screen, carousel, keybind menu, clock, visualiser, lyrics |
+| `quickshell` 0.3 | dashboard, control centre, notifications, OSD, lock screen, rice menu, themes & wallpapers panel, keybind menu, clock, visualiser, lyrics |
 | `waybar` 0.15, `rofi` 2.0 | bar; launcher, clipboard, session and Wi-Fi menus |
 | `awww` (formerly swww) | wallpaper |
-| `matugen` 4.x | the palette from the wallpaper |
+| `matugen` 4.x | the palette from the wallpaper, and rendering a theme's colours |
+| `python-numpy`, `python-pillow` | sorting wallpapers into themes, the panel's thumbnails |
+| `git` | `rice-theme import-omarchy` |
 | `hypridle`, `hyprlock` | idle; lock-screen fallback and its PAM config |
 | `hyprpolkitagent` | password prompts |
 | `grim`, `slurp`, `satty`, `gpu-screen-recorder` | screenshots, annotation, recording, replay buffer |
@@ -35,7 +37,7 @@ Plus `bibata-cursor-theme-bin` from the AUR, or change `XCURSOR_THEME` in
 | `wireplumber`, `playerctl`, `brightnessctl` | media keys and the OSD |
 | `hyprsunset` | Night Light |
 | `upower`, `power-profiles-daemon` | Energy card and power profiles |
-| `imagemagick` | carousel thumbnails |
+| `imagemagick` | the terminal greeting's logo |
 | `jq`, `curl` | wallhaven search, settings menus, weather |
 | `socat`, `python-gobject`, `gtk-layer-shell` | read-aloud and its subtitle tile |
 | `cava` | desktop visualiser |

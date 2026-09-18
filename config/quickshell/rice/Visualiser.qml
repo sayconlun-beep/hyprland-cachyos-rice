@@ -1,5 +1,5 @@
-// Desktop visualiser: cava across the middle of every monitor, on the BOTTOM
-// layer - above the wallpaper, under every window - on every workspace.
+// Desktop visualiser: cava along the bottom edge of every monitor, on the
+// BOTTOM layer - above the wallpaper, under every window - on every workspace.
 //
 // cava only does the maths here. It runs once, in raw mode, printing one line
 // of bar levels per frame; the bars are drawn by Qt, which is what allows
@@ -7,8 +7,10 @@
 // this replaced could do none of that: terminal cells have no alpha, and cava
 // spaces bars in whole columns.)
 //
-// Bars grow up and down from a centre line; in silence all that is left is a
-// dashed line. Colours follow the palette, so wallpaper previews recolour it.
+// Square, see-through bars rise from the bottom edge, bass on the left, each
+// with a brighter top edge; in silence a row of short stubs is left. The
+// colour runs left to right across the palette (primary -> secondary ->
+// tertiary), so wallpaper previews recolour it.
 // cava's pulse input follows the default output, headphones included.
 //
 //   qs -c rice ipc call visualiser toggle      (Super+Shift+V)
@@ -22,19 +24,19 @@ Scope {
 
     property bool enabled: true
 
-    readonly property int bandHeight: 360      // logical px, centred on each monitor
-    readonly property int barWidth: 9
-    readonly property int barGap: 4
-    readonly property real barOpacity: 0.8
-    readonly property int minBar: 2            // the centre line in silence
+    readonly property int bandHeight: 400      // logical px, up from the bottom edge
+    readonly property int barWidth: 28
+    readonly property int barGap: 3
+    readonly property real barOpacity: 0.45
+    readonly property int capHeight: 2         // the brighter top edge
+    readonly property int minBar: 4            // the stubs left in silence
 
     // One cava feeds every monitor, so the bar count comes from the widest.
     readonly property int count: {
         let widest = 0
         for (const s of Quickshell.screens)
             widest = Math.max(widest, s.width)
-        const n = Math.floor((widest + barGap) / (barWidth + barGap))
-        return Math.max(2, n - n % 2)          // even: stereo splits it in half
+        return Math.max(2, Math.floor((widest + barGap) / (barWidth + barGap)))
     }
 
     property var levels: []
@@ -64,7 +66,7 @@ data_format = ascii
 ascii_max_range = 1000
 bar_delimiter = 59
 frame_delimiter = 10
-channels = stereo
+channels = mono
 mono_option = average
 
 [smoothing]
@@ -117,6 +119,14 @@ noise_reduction = 60
         }
     }
 
+    // The colour at x (0..1) across the screen.
+    function colourAt(t) {
+        const a = t < 0.5 ? Theme.primary : Theme.secondary
+        const b = t < 0.5 ? Theme.secondary : Theme.tertiary
+        const u = t < 0.5 ? t * 2 : (t - 0.5) * 2
+        return Qt.rgba(a.r + (b.r - a.r) * u, a.g + (b.g - a.g) * u, a.b + (b.b - a.b) * u, 1)
+    }
+
     Timer {
         id: restart
         interval: 1500
@@ -132,8 +142,8 @@ noise_reduction = 60
 
             screen: modelData
             visible: root.enabled
-            // Left + right only: layer-shell centres the band vertically.
             anchors {
+                bottom: true
                 left: true
                 right: true
             }
@@ -150,24 +160,31 @@ noise_reduction = 60
                 readonly property real total: root.count * (root.barWidth + root.barGap) - root.barGap
 
                 anchors.fill: parent
-                opacity: root.barOpacity
 
                 Repeater {
                     model: root.count
 
-                    Rectangle {
+                    Item {
                         required property int index
                         readonly property real level: root.levels[index] || 0
+                        readonly property color colour: root.colourAt(root.count > 1 ? index / (root.count - 1) : 0)
 
                         x: (bars.width - bars.total) / 2 + index * (root.barWidth + root.barGap)
                         width: root.barWidth
                         height: Math.max(root.minBar, level * bars.height)
-                        y: (bars.height - height) / 2
-                        radius: root.barWidth / 2
-                        gradient: Gradient {
-                            GradientStop { position: 0.0; color: Theme.primary_fixed }
-                            GradientStop { position: 0.5; color: Theme.primary_container }
-                            GradientStop { position: 1.0; color: Theme.primary_fixed }
+                        y: bars.height - height
+
+                        Rectangle {
+                            anchors.fill: parent
+                            color: parent.colour
+                            opacity: root.barOpacity
+                        }
+
+                        Rectangle {
+                            width: parent.width
+                            height: root.capHeight
+                            color: parent.colour
+                            opacity: 0.85
                         }
                     }
                 }

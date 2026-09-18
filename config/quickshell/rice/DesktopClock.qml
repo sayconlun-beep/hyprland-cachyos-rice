@@ -1,4 +1,4 @@
-// Desktop clock: big time, an accent line, the date - centred in the upper
+// Desktop clock: the date, then a light time with seconds - centred in the upper
 // part of every monitor, on the BOTTOM layer (on the wallpaper, under windows),
 // so it shows whenever the desktop does. Takes no clicks.
 //
@@ -15,8 +15,8 @@ Scope {
 
     readonly property bool use24h: false       // the bar shows 12-hour, so this does too
     readonly property real topFraction: 0.12   // band top, as a share of screen height
-    readonly property int timeSize: 120
-    readonly property int dateSize: 24
+    readonly property int timeSize: 96
+    readonly property int dateSize: 20
 
     property date now: new Date()
 
@@ -24,8 +24,7 @@ Scope {
         enabled = !enabled
     }
 
-    // Ticks on the second, so the minute turns over on time; drawing only
-    // changes once a minute because the text only does.
+    // Ticks on the second - the time shows seconds.
     Timer {
         running: root.enabled
         repeat: true
@@ -68,27 +67,38 @@ Scope {
                     shadowVerticalOffset: 3
                 }
 
+                // Compact, after the user's reference video: a small monospace
+                // date on top, then a light time with seconds.
                 Column {
                     anchors.horizontalCenter: parent.horizontalCenter
                     anchors.top: parent.top
                     anchors.topMargin: 10
-                    spacing: 10
+                    spacing: 2
+
+                    Text {
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        text: Qt.formatDateTime(root.now, "dddd, MMMM d, yyyy")
+                        color: Theme.on_surface
+                        opacity: 0.65
+                        font.family: Theme.mono
+                        font.pixelSize: root.dateSize
+                    }
 
                     Row {
                         anchors.horizontalCenter: parent.horizontalCenter
-                        spacing: 10
+                        spacing: 8
 
                         // The accent colour, so the clock follows the wallpaper's palette.
                         Text {
                             id: time
-                            text: Qt.formatDateTime(root.now, root.use24h ? "HH:mm" : "h:mm")
+                            text: Qt.formatDateTime(root.now, root.use24h ? "HH:mm:ss" : "h:mm:ss")
                             color: Theme.primary
                             Behavior on color {
                                 ColorAnimation { duration: 400 }
                             }
                             font.family: Theme.font
                             font.pixelSize: root.timeSize
-                            font.weight: Font.Bold
+                            font.weight: Font.Light
                             font.features: { "tnum": 1 }    // digits keep their width
                         }
 
@@ -100,28 +110,11 @@ Scope {
                             Behavior on color {
                                 ColorAnimation { duration: 400 }
                             }
-                            opacity: 0.75
+                            opacity: 0.7
                             font.family: Theme.font
                             font.pixelSize: Math.round(root.timeSize * 0.24)
-                            font.weight: Font.DemiBold
+                            font.weight: Font.Normal
                         }
-                    }
-
-                    Rectangle {
-                        anchors.horizontalCenter: parent.horizontalCenter
-                        width: 44
-                        height: 4
-                        radius: 2
-                        color: Theme.primary
-                    }
-
-                    Text {
-                        anchors.horizontalCenter: parent.horizontalCenter
-                        text: Qt.formatDateTime(root.now, "dddd, d MMMM")
-                        color: Theme.on_surface
-                        opacity: 0.85
-                        font.family: Theme.font
-                        font.pixelSize: root.dateSize
                     }
                 }
             }

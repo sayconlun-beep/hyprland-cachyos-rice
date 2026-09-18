@@ -1,0 +1,372 @@
+#!/usr/bin/env python3
+"""Which named theme does a wallpaper belong to? And what is in each theme?
+
+Used through rice-theme (sort, pin, list --json); it can also be run directly.
+
+  rice-theme-match rank <image>...      best themes for each image, with scores
+  rice-theme-match eval                 score the matcher on the themes' own
+                                        backgrounds (each should find its theme)
+  rice-theme-match sort [--quiet]       hardlink every wallpaper in
+                                        ~/Pictures/Wallpapers into the
+                                        backgrounds/ of the theme it matches
+                                        (or the one it is pinned to)
+  rice-theme-match pin <file> <theme>   always file <file> under <theme>
+                                        (`auto` removes the pin); then sort
+  rice-theme-match catalog [--walls]    JSON of every theme for the picker:
+                                        name, accent, palette, preview, and
+                                        with --walls its wallpapers (+ strip
+                                        and card thumbnails, made as needed)
+
+An image is reduced to its main colours (k-means in CIE Lab, weighted by area);
+a theme is its whole colors.toml palette. The score (lower is better) runs both
+ways: the area-weighted distance from each of the image's colours to the nearest
+colour in the theme, plus how far the theme's background and accent are from
+anything in the image - otherwise themes full of earthy browns won everything
+brownish. Lightness counts half, so hue decides more than brightness. Tuned
+with `eval`: 58% of Omarchy's own backgrounds pick their theme first, 81% have
+it in the top 3 (the misses are mostly black-and-white art that White,
+Vantablack and Lupine all fit).
+
+Pins live in ~/.config/rice/wallpaper-pins.json as {"<file name>": "<theme>"}:
+Wallhaven downloads made with a theme filter are pinned to that theme.
+
+Sorted copies are HARDLINKS named `mine-<file>` (same disk, no extra space),
+so they sit in the theme like its own backgrounds. Only links this script
+made are ever deleted: they are listed
+in ~/.cache/rice/wallsort/links.json, and a re-sort moves or drops them when a
+wallpaper's best theme changes or its original is gone. Image profiles are
+cached by path + size + mtime, so a re-sort only looks at new files.
+"""
+import hashlib
+import json
+import os
+import sys
+import tomllib
+from concurrent.futures import ProcessPoolExecutor
+
+import numpy as np
+from PIL import Image
+
+HOME = os.path.expanduser("~")
+THEMES = os.environ.get("RICE_THEMES_DIR", f"{HOME}/.config/rice/themes")
+WALLS = os.environ.get("RICE_WALLPAPER_DIR", f"{HOME}/Pictures/Wallpapers")
+CACHE = f"{HOME}/.cache/rice/wallsort"
+RICE_CACHE = f"{HOME}/.cache/rice"
+PINS = f"{HOME}/.config/rice/wallpaper-pins.json"
+EXTS = (".jpg", ".jpeg", ".png", ".webp")
+PREFIX = "mine-"
+
+
+# ------------------------------------------------------------------ colour --
+def to_lab(rgb):
+    """sRGB 0-255 (N,3) -> CIE Lab (N,3), D65."""
+    c = rgb / 255.0
+    c = np.where(c <= 0.04045, c / 12.92, ((c + 0.055) / 1.055) ** 2.4)
+    xyz = c @ np.array([[0.4124, 0.3576, 0.1805],
+                        [0.2126, 0.7152, 0.0722],
+                        [0.0193, 0.1192, 0.9505]]).T
+    xyz /= np.array([0.95047, 1.0, 1.08883])
+    f = np.where(xyz > 0.008856, np.cbrt(xyz), 7.787 * xyz + 16 / 116)
+    return np.stack([116 * f[:, 1] - 16, 500 * (f[:, 0] - f[:, 1]), 200 * (f[:, 1] - f[:, 2])], axis=1)
+
+
+def hex_rgb(h):
+    h = h.lstrip("#")
+    return [int(h[i:i + 2], 16) for i in (0, 2, 4)]
+
+
+def kmeans(x, k=8, iters=12):
+    rng = np.random.default_rng(0)
+    centres = x[rng.choice(len(x), k, replace=False)]
+    for _ in range(iters):
+        lbl = np.argmin(((x[:, None] - centres[None]) ** 2).sum(-1), axis=1)
+        for j in range(k):
+            m = lbl == j
+            if m.any():
+                centres[j] = x[m].mean(0)
+    lbl = np.argmin(((x[:, None] - centres[None]) ** 2).sum(-1), axis=1)
+    w = np.bincount(lbl, minlength=k) / len(x)
+    return centres, w
+
+
+def profile(path):
+    """The image's main colours in Lab, with their share of the area."""
+    im = Image.open(path)
+    im.draft("RGB", (256, 256))           # JPEG decodes at a fraction of full size
+    im = im.convert("RGB")
+    im.thumbnail((96, 96))
+    lab = to_lab(np.asarray(im, dtype=np.float64).reshape(-1, 3))
+    centres, w = kmeans(lab)
+    keep = w > 0.01
+    return {"lab": centres[keep].tolist(), "w": (w[keep] / w[keep].sum()).tolist()}
+
+
+def cached_profile(path):
+    f = cache_file(path)
+    try:
+        with open(f) as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        pass
+    p = profile(path)
+    os.makedirs(os.path.dirname(f), exist_ok=True)
+    with open(f, "w") as fh:
+        json.dump(p, fh)
+    return p
+
+
+# ------------------------------------------------------------------ themes --
+def themes():
+    out = {}
+    for name in sorted(os.listdir(THEMES)):
+        toml = f"{THEMES}/{name}/colors.toml"
+        if not os.path.isfile(toml):
+            continue
+        with open(toml, "rb") as fh:
+            t = tomllib.load(fh)
+        cols = [v for v in t.values() if isinstance(v, str) and v.startswith("#") and len(v) == 7]
+        lab = lambda cs: to_lab(np.array([hex_rgb(c) for c in cs], dtype=np.float64)) * WEIGHT
+        out[name] = {"all": lab(cols), "bg": lab([t["background"]]), "accent": lab([t["accent"]])}
+    return out
+
+
+WEIGHT = np.array([0.5, 1.0, 1.0])   # L, a, b
+BACK = 0.25                          # weight of the theme's background / accent being in the image
+
+
+def dist(a, b):
+    return np.sqrt(((a[:, None] - b[None]) ** 2).sum(-1))
+
+
+def score(prof, th):
+    lab, w = np.array(prof["lab"]) * WEIGHT, np.array(prof["w"])
+    forward = (w * dist(lab, th["all"]).min(1)).sum()
+    back = dist(th["bg"], lab).min() + dist(th["accent"], lab).min()
+    return float(forward + BACK * back)
+
+
+def rank(prof, ths):
+    return sorted(((score(prof, pal), name) for name, pal in ths.items()))
+
+
+def images(d):
+    try:
+        names = sorted(os.listdir(d))
+    except OSError:
+        return []
+    return [f"{d}/{n}" for n in names if n.lower().endswith(EXTS) and os.path.isfile(f"{d}/{n}")]
+
+
+def cache_file(path):
+    st = os.stat(path)
+    key = hashlib.md5(f"{os.path.realpath(path)}|{st.st_size}|{st.st_mtime_ns}|v1".encode()).hexdigest()[:16]
+    return f"{CACHE}/profiles/{key}.json"
+
+
+def profiles(paths):
+    """Profiles for every path; only new images start worker processes."""
+    new = [p for p in paths if not os.path.exists(cache_file(p))]
+    if new:
+        with ProcessPoolExecutor(8) as ex:
+            list(ex.map(cached_profile, new))
+    return {p: cached_profile(p) for p in paths}
+
+
+# ---------------------------------------------------------------- commands --
+def cmd_rank(paths):
+    ths = themes()
+    for p, prof in profiles(paths).items():
+        r = rank(prof, ths)
+        print(os.path.basename(p) + ":  " + "  ".join(f"{n} {s:.1f}" for s, n in r[:4]))
+
+
+def cmd_eval():
+    ths = themes()
+    own = {p: name for name in ths for p in images(f"{THEMES}/{name}/backgrounds")
+           if not os.path.basename(p).startswith(PREFIX)}
+    profs = profiles(list(own))
+    top1 = top3 = 0
+    for p, name in own.items():
+        r = [n for _, n in rank(profs[p], ths)]
+        top1 += r[0] == name
+        top3 += name in r[:3]
+        if r[0] != name:
+            print(f"  {name}/{os.path.basename(p)} -> {', '.join(r[:3])}")
+    n = len(own)
+    print(f"{n} backgrounds: {top1} ({100 * top1 // n}%) found their own theme first, {top3} ({100 * top3 // n}%) in the top 3")
+
+
+def load_pins():
+    try:
+        with open(PINS) as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {}
+
+
+def cmd_pin(path, theme):
+    pins = load_pins()
+    name = os.path.basename(path)
+    if theme == "auto":
+        pins.pop(name, None)
+    elif os.path.isfile(f"{THEMES}/{theme}/colors.toml"):
+        pins[name] = theme
+    else:
+        sys.exit(f"rice-theme-match: no theme called {theme}")
+    os.makedirs(os.path.dirname(PINS), exist_ok=True)
+    with open(PINS, "w") as fh:
+        json.dump(pins, fh, indent=1, sort_keys=True)
+    cmd_sort(True)
+
+
+def cmd_sort(quiet):
+    ths = themes()
+    pins = load_pins()
+    manifest_path = f"{CACHE}/links.json"
+    try:
+        with open(manifest_path) as fh:
+            links = json.load(fh)       # original path -> link path
+    except (OSError, ValueError):
+        links = {}
+
+    walls = images(WALLS)
+    profs = profiles(walls)
+    moved = added = dropped = 0
+    counts = {}
+    for p in walls:
+        pinned = pins.get(os.path.basename(p))
+        best = pinned if pinned in ths else rank(profs[p], ths)[0][1]
+        counts[best] = counts.get(best, 0) + 1
+        want = f"{THEMES}/{best}/backgrounds/{PREFIX}{os.path.basename(p)}"
+        have = links.get(p)
+        if have == want and os.path.exists(want):
+            continue
+        if have and os.path.exists(have):
+            os.remove(have)
+            moved += 1
+        else:
+            added += 1
+        os.makedirs(os.path.dirname(want), exist_ok=True)
+        if os.path.exists(want):
+            os.remove(want)
+        os.link(p, want)
+        links[p] = want
+
+    for p in [p for p in links if p not in profs]:      # originals that are gone
+        if os.path.exists(links[p]):
+            os.remove(links[p])
+        del links[p]
+        dropped += 1
+
+    os.makedirs(CACHE, exist_ok=True)
+    with open(manifest_path, "w") as fh:
+        json.dump(links, fh, indent=1)
+    if not quiet:
+        for name in sorted(counts, key=lambda n: -counts[n]):
+            print(f"  {counts[name]:3d}  {name}")
+        print(f"{len(walls)} wallpapers: {added} added, {moved} moved, {dropped} removed")
+
+
+# ----------------------------------------------------------------- catalog --
+def pretty(name):
+    return "Wallpaper" if name == "wallpaper" else " ".join(w.capitalize() for w in name.replace("_", "-").split("-"))
+
+
+def thumb(path, size):
+    """A cached JPEG of <path> cropped to 16:9 at <size> px wide."""
+    st = os.stat(path)
+    key = hashlib.md5(f"{os.path.realpath(path)}|{st.st_size}|{st.st_mtime_ns}|{size}".encode()).hexdigest()[:16]
+    return f"{RICE_CACHE}/strip/{key}.jpg"
+
+
+def make_thumb(args):
+    path, size = args
+    out = thumb(path, size)
+    if os.path.exists(out):
+        return
+    try:
+        im = Image.open(path)
+        im.draft("RGB", (size * 2, size * 2))
+        im = im.convert("RGB")
+        w, h = im.size
+        th = round(w * 9 / 16)
+        if th <= h:
+            box = (0, (h - th) // 2, w, (h - th) // 2 + th)
+        else:
+            tw = round(h * 16 / 9)
+            box = ((w - tw) // 2, 0, (w - tw) // 2 + tw, h)
+        im = im.crop(box).resize((size, round(size * 9 / 16)), Image.LANCZOS)
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        im.save(out + ".part", "JPEG", quality=88)
+        os.replace(out + ".part", out)
+    except Exception as e:                  # a broken image just has no thumbnail
+        print(f"rice-theme-match: {path}: {e}", file=sys.stderr)
+
+
+def read(path):
+    try:
+        with open(path) as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
+
+
+def cmd_catalog(with_walls):
+    current_theme = read(f"{RICE_CACHE}/theme")
+    if not os.path.isfile(f"{THEMES}/{current_theme}/colors.toml"):
+        current_theme = "wallpaper"
+    on_screen = os.path.realpath(f"{RICE_CACHE}/wallpaper")
+    last = read(f"{RICE_CACHE}/wallpaper-last")
+
+    out = []
+    names = ["wallpaper"] + [n for n in sorted(os.listdir(THEMES)) if os.path.isfile(f"{THEMES}/{n}/colors.toml")]
+    for name in names:
+        if name == "wallpaper":
+            t, walls = {}, images(WALLS)
+            chosen = on_screen if current_theme == "wallpaper" else last
+            mode = read(f"{RICE_CACHE}/mode-wallpaper" if current_theme != "wallpaper" else f"{RICE_CACHE}/mode") or "dark"
+        else:
+            with open(f"{THEMES}/{name}/colors.toml", "rb") as fh:
+                t = tomllib.load(fh)
+            walls = images(f"{THEMES}/{name}/backgrounds")
+            chosen = on_screen if current_theme == name else read(f"{RICE_CACHE}/theme-bg/{name}")
+            mode = t.get("mode", "dark")
+        if chosen not in walls:
+            chosen = walls[0] if walls else ""
+        preview = f"{THEMES}/{name}/preview.png"
+        entry = {
+            "id": name, "name": pretty(name), "accent": t.get("accent", ""), "background": t.get("background", ""),
+            "mode": "light" if mode == "light" else "dark",
+            "palette": [v for v in t.values() if isinstance(v, str) and v.startswith("#") and len(v) == 7],
+            "preview": preview if os.path.isfile(preview) else chosen,
+            "current": name == current_theme, "wallpaper": chosen, "count": len(walls),
+        }
+        if with_walls:
+            entry["walls"] = [{"path": w, "name": os.path.splitext(os.path.basename(w))[0].removeprefix(PREFIX),
+                               "mine": os.path.basename(w).startswith(PREFIX) or name == "wallpaper",
+                               "thumb": thumb(w, 384), "card": thumb(w, 1280)} for w in walls]
+        out.append(entry)
+
+    if with_walls:
+        jobs = [(w["path"], size) for e in out for w in e["walls"] for size in (384, 1280)
+                if not os.path.exists(thumb(w["path"], size))]
+        if jobs:
+            with ProcessPoolExecutor(8) as ex:
+                list(ex.map(make_thumb, jobs))
+    json.dump(out, sys.stdout)
+
+
+if __name__ == "__main__":
+    args = sys.argv[1:]
+    if args[:1] == ["rank"] and len(args) > 1:
+        cmd_rank(args[1:])
+    elif args == ["eval"]:
+        cmd_eval()
+    elif args[:1] == ["sort"]:
+        cmd_sort("--quiet" in args)
+    elif args[:1] == ["pin"] and len(args) == 3:
+        cmd_pin(args[1], args[2])
+    elif args[:1] == ["catalog"]:
+        cmd_catalog("--walls" in args)
+    else:
+        sys.exit(__doc__)

@@ -3,45 +3,48 @@
 # palette from it, rice-theme-reload pushes that into everything running.
 #
 #   rice-wallpaper set <file>       show <file> and re-theme
-#   rice-wallpaper next | prev | random
-#   rice-wallpaper pick             rofi thumbnail grid (the old picker)
+#   rice-wallpaper next | prev | random   within the active theme (Super+Alt+W)
 #   rice-wallpaper restore          login: the last wallpaper, no transition
 #   rice-wallpaper theme [file]     palette only - needs no daemon
 #   rice-wallpaper current
 #   rice-wallpaper mode [dark|light|toggle]   re-theme the current wallpaper
 #                                   in that mode; no argument prints it
 #
-# Used by the Quickshell carousel (Super+Shift+W):
-#   rice-wallpaper palettes         JSON: every wallpaper, its thumbnail and palette
-#   rice-wallpaper preview <file>   show it and recolour the cheap things (bar,
-#                                   borders, cava) - NOT made current
-#   rice-wallpaper commit <file>    make it current and re-theme everything;
-#                                   no transition, the preview already shows it
-#
-# ~/Pictures/Wallpapers is curated for the palettes its images produce, so
-# cycling is a colour-scheme switcher as much as a picture switcher.
+# Picking is done in the theme picker (ThemePicker.qml, Super+Shift+W), which
+# goes through rice-theme. Named themes: while one is active, a file in its
+# backgrounds/ gets the theme's exact colours (rice-theme-palette; matugen from
+# its accent when dark/light is flipped away from the theme's own) and
+# next/prev/random cycle those backgrounds. Showing any other file - one from
+# ~/Pictures/Wallpapers, which is the "wallpaper" theme's list - goes back to
+# the "wallpaper" theme, coloured from the image.
 set -uo pipefail
 
 DIR="${RICE_WALLPAPER_DIR:-$HOME/Pictures/Wallpapers}"
 CACHE="$HOME/.cache/rice"           # literal ~/.cache: matugen's config writes here too
 CURRENT="$CACHE/wallpaper"          # symlink to the image on screen
-THUMBS="$CACHE/thumbs"
-PALETTES="$CACHE/palettes"
 # tonal-spot + --prefer saturation reproduces the palettes Noctalia derived.
 # Without --prefer, matugen stops to ask when an image has several candidate
 # source colours - and with no terminal attached it just fails.
 SCHEME="${RICE_SCHEME:-scheme-tonal-spot}"
 
-mkdir -p "$CACHE" "$THUMBS" "$PALETTES"
+mkdir -p "$CACHE"
 
 # dark or light, set by `rice-wallpaper mode` (the control centre's theme card)
 MODE="$(cat "$CACHE/mode" 2>/dev/null)"
 [[ "$MODE" == light ]] || MODE=dark
 
+# the named theme in use (rice-theme); empty = colours come from the image
+THEMES="${RICE_THEMES_DIR:-$HOME/.config/rice/themes}"
+THEME_NAME="$(cat "$CACHE/theme" 2>/dev/null)"
+THEME_DIR=""
+[[ -n "$THEME_NAME" && -f "$THEMES/$THEME_NAME/colors.toml" ]] && THEME_DIR="$THEMES/$THEME_NAME"
+
 die() { echo "rice-wallpaper: $*" >&2; notify-send -a rice-wallpaper "Wallpaper" "$*" 2>/dev/null; exit 1; }
 
-list() {
-    find -L "$DIR" -maxdepth 1 -type f \( -iname '*.jpg' -o -iname '*.jpeg' \
+list() {   # list [cycle]: with "cycle", the active theme's backgrounds instead
+    local dir="$DIR"
+    [[ "${1:-}" == cycle && -n "$THEME_DIR" ]] && dir="$THEME_DIR/backgrounds"
+    find -L "$dir" -maxdepth 1 -type f \( -iname '*.jpg' -o -iname '*.jpeg' \
         -o -iname '*.png' -o -iname '*.webp' -o -iname '*.gif' \) | sort
 }
 
@@ -57,9 +60,50 @@ daemon() {
     die "awww-daemon did not start"
 }
 
+toml_get() { grep -oP "^$1\\s*=\\s*\"\\K[^\"]+" "$2" 2>/dev/null | head -n1; }
+
+in_theme() {   # is <file> one of the active theme's backgrounds?
+    [[ -n "$THEME_DIR" ]] || return 1
+    [[ "$(readlink -f -- "$1")" == "$(readlink -f -- "$THEME_DIR/backgrounds")"/* ]]
+}
+
+# Back to colours-from-the-wallpaper, with the dark/light it had before.
+leave_theme() {
+    [[ -n "$THEME_DIR" ]] || return 0
+    rm -f "$CACHE/theme"
+    if [[ -s "$CACHE/mode-wallpaper" ]]; then
+        cp "$CACHE/mode-wallpaper" "$CACHE/mode"
+        MODE="$(cat "$CACHE/mode")"
+    fi
+    THEME_NAME="" THEME_DIR=""
+}
+
 theme() {
-    matugen image "$1" -m "$MODE" -t "$SCHEME" --prefer saturation -q \
-        || die "matugen could not derive a palette from $1"
+    if in_theme "$1"; then
+        local toml="$THEME_DIR/colors.toml" scheme accent own
+        scheme="$(toml_get matugen_scheme "$toml")"
+        accent="$(toml_get accent "$toml")"
+        own="$(toml_get mode "$toml")"; [[ "$own" == light ]] || own=dark
+        # fidelity keeps grey accents grey; tonal-spot turned Vantablack cyan
+        if [[ "$MODE" == "$own" ]]; then
+            # The theme's own colours, exactly: matugen's roles for the accent
+            # fill any gap, rice-theme-palette overrides the rest, and
+            # `matugen json` renders the templates from that verbatim.
+            local fb="$CACHE/theme-fallback.json" js="$CACHE/theme-colors.json"
+            matugen color hex "$accent" -m "$MODE" -t "${scheme:-scheme-fidelity}" --dry-run -j hex 2>/dev/null > "$fb" \
+                && "$HOME/.local/bin/rice-theme-palette" json "$toml" "$fb" > "$js" \
+                && matugen json "$js" -m "$MODE" -q \
+                && "$HOME/.local/bin/rice-theme-palette" terminal "$toml" \
+                || die "could not apply $THEME_NAME's colours"
+        else
+            # dark/light flipped away from the theme's own: matugen from the accent
+            matugen color hex "$accent" -m "$MODE" -t "${scheme:-scheme-fidelity}" -q \
+                || die "matugen could not make a palette from $THEME_NAME's accent"
+        fi
+    else
+        matugen image "$1" -m "$MODE" -t "$SCHEME" --prefer saturation -q \
+            || die "matugen could not derive a palette from $1"
+    fi
 }
 
 show() {   # show <file> none|wipe
@@ -74,6 +118,15 @@ show() {   # show <file> none|wipe
             --transition-duration 1.1 --transition-fps 120 --transition-bezier .19,1,.22,1
     fi
     ln -sfn "$f" "$CURRENT"
+    if in_theme "$f"; then
+        mkdir -p "$CACHE/theme-bg"
+        printf '%s\n' "$f" > "$CACHE/theme-bg/$THEME_NAME"
+    else
+        leave_theme
+        printf '%s\n' "$f" > "$CACHE/wallpaper-last"
+        # a new wallpaper (Wallhaven, a file dropped in) gets filed into its theme
+        setsid -f "$HOME/.local/bin/rice-theme" sort --quiet >/dev/null 2>&1
+    fi
     theme "$f"
     "$HOME/.local/bin/rice-theme-reload"
     greeter_sync
@@ -90,36 +143,9 @@ index_of_current() {   # prints -1 when the current image is not in the folder
     echo -1
 }
 
-load() {
-    mapfile -t all < <(list)
+load() {   # load [cycle]
+    mapfile -t all < <(list "${1:-}")
     (( ${#all[@]} )) || die "no wallpapers in $DIR"
-}
-
-# Big enough for the carousel's middle card; the size is in the name so a
-# change regenerates them instead of reusing smaller ones.
-thumb_path() { printf '%s/%s.png' "$THUMBS" "$(printf '%s|1040' "$1" | md5sum | cut -c1-16)"; }
-
-make_thumbs() {
-    local f t
-    for f in "${all[@]}"; do
-        t="$(thumb_path "$f")"
-        [[ -s "$t" && "$t" -nt "$f" ]] && continue
-        magick "${f}[0]" -thumbnail 1040x650^ -gravity center -extent 1040x650 "$t" 2>/dev/null &
-        (( $(jobs -rp | wc -l) >= 8 )) && wait -n
-    done
-    wait
-}
-
-# A palette as flat {"role": "#rrggbb"} JSON, from a matugen dry run (~0.2s),
-# cached per scheme + path and redone when the image is newer.
-palette_of() {
-    local f="$1" p
-    p="$PALETTES/$(printf '%s|%s|%s' "$SCHEME" "$MODE" "$f" | md5sum | cut -c1-16).json"
-    if [[ ! -s "$p" || "$f" -nt "$p" ]]; then
-        matugen image "$f" -m "$MODE" -t "$SCHEME" --prefer saturation --dry-run -j hex -q 2>/dev/null \
-            | jq -c '.colors | map_values(.default.color)' > "$p.tmp" && mv "$p.tmp" "$p"
-    fi
-    printf '%s\n' "$p"
 }
 
 case "${1:-}" in
@@ -128,7 +154,7 @@ case "${1:-}" in
         show "$2" wipe
         ;;
     next|prev)
-        load
+        load cycle
         idx="$(index_of_current)"; n=${#all[@]}
         if [[ "$1" == next ]]; then i=$(( (idx + 1) % n )); else
             (( idx < 0 )) && idx=0
@@ -137,21 +163,11 @@ case "${1:-}" in
         show "${all[$i]}" wipe
         ;;
     random)
-        load
+        load cycle
         idx="$(index_of_current)"; n=${#all[@]}
         i=$(( RANDOM % n ))
         (( n > 1 && i == idx )) && i=$(( (i + 1) % n ))
         show "${all[$i]}" wipe
-        ;;
-    pick)
-        load
-        make_thumbs
-        idx="$(index_of_current)"; (( idx < 0 )) && idx=0
-        choice="$(for f in "${all[@]}"; do
-                      printf '%s\0icon\x1f%s\n' "$(basename "$f")" "$(thumb_path "$f")"
-                  done | rofi -dmenu -i -show-icons -no-custom -format i -p "󰸉  wallpaper" \
-                              -selected-row "$idx" -theme ~/.config/rofi/wallpaper.rasi)" || exit 0
-        [[ -n "$choice" ]] && show "${all[$choice]}" wipe
         ;;
     restore)
         f="$(current)"
@@ -168,41 +184,6 @@ case "${1:-}" in
         ;;
     current)
         current
-        ;;
-    palettes)
-        load
-        make_thumbs
-        for f in "${all[@]}"; do
-            palette_of "$f" >/dev/null &
-            (( $(jobs -rp | wc -l) >= 8 )) && wait -n
-        done
-        wait
-        for f in "${all[@]}"; do
-            jq -nc --arg path "$(readlink -f -- "$f")" --arg thumb "$(thumb_path "$f")" \
-                   --slurpfile c "$(palette_of "$f")" \
-                   '{path: $path, name: ($path | split("/") | last | sub("\\.[^.]+$"; "")),
-                     thumb: $thumb, colors: $c[0]}'
-        done | jq -sc --arg cur "$(current)" '{current: $cur, walls: .}'
-        ;;
-    preview)
-        f="$(readlink -f -- "${2:-}")"
-        [[ -f "$f" ]] || die "usage: rice-wallpaper preview <file>"
-        daemon
-        # No transition: the carousel cross-fades its own copy of the image,
-        # and awww is only visible in the strip under the bar, where a fade
-        # just made it trail the carousel by half a second.
-        awww img "$f" --resize crop --transition-type none
-        theme "$f"
-        # Only what is cheap and visible around the carousel. waybar reloads
-        # its CSS by itself (reload_style_on_change); kitty, GTK and Qt wait
-        # for commit.
-        [[ -s "$CACHE/hypr-colors.lua" ]] && hyprctl eval "$(< "$CACHE/hypr-colors.lua")" >/dev/null 2>&1
-        pkill -USR2 -x cava
-        exit 0
-        ;;
-    commit)
-        [[ -n "${2:-}" ]] || die "usage: rice-wallpaper commit <file>"
-        show "$2" none
         ;;
     mode)
         want="${2:-}"

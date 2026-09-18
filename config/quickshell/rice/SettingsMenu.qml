@@ -4,10 +4,12 @@
 // Picking an entry closes the hub and opens that panel. Entries that are a
 // switch rather than a panel (visualiser, power profile) change in place and
 // keep the hub open, showing their new state.
+//
+// The list itself is the "settings" branch of menu.jsonc, shared with the
+// rice menu (Super+Space); each child submenu there is a section here.
 import QtQuick
 import QtQuick.Layouts
 import Quickshell
-import Quickshell.Io
 import Quickshell.Wayland
 import Quickshell.Hyprland
 
@@ -17,97 +19,18 @@ Scope {
     property bool open: false
     property int sel: 0
     property var targetScreen: null
-    property string powerProfile: ""
 
-    // Wired up by shell.qml.
-    property var visualiser: null
-    property var clock: null
-    property var lyrics: null
-    property var controlCenter: null
-    property var notifications: null
-    property var dashboard: null
-    property var captureMenu: null
-    property var walls: null
-    property var binds: null
-    property var displays: null
+    // RiceMenu, wired up by shell.qml: the hub lists its "settings" branch
+    // (menu.jsonc) and runs entries through it.
+    property var menu: null
 
-    readonly property string bin: Quickshell.env("HOME") + "/.local/bin/"
-
-    // run: argv started detached · call: a function · keep: stay open (switches)
-    readonly property var entries: [
-        { section: "Rice", icon: "󰕮", label: "Dashboard", hint: "media, weather, system, tasks",
-          call: () => root.dashboard.show() },
-        { section: "Rice", icon: "󰄀", label: "Screenshot & record", hint: "screen, window or area",
-          call: () => root.captureMenu.show() },
-        { section: "Rice", icon: "󰉼", label: "Look", hint: "gaps, borders, rounding, blur",
-          run: [bin + "rice-settings", "look"] },
-        { section: "Rice", icon: "󰍹", label: "Displays", hint: "arrange screens by dragging",
-          call: () => root.displays.show() },
-        { section: "Rice", icon: "󰍺", label: "Display modes", hint: "resolution, scale, refresh, VRR",
-          run: [bin + "rice-settings", "displays"] },
-        { section: "Rice", icon: "󰌌", label: "Keybinds", hint: "cheatsheet and rebinding",
-          call: () => root.binds.show() },
-        { section: "Rice", icon: "󰸉", label: "Wallpaper", hint: "carousel with live preview",
-          call: () => root.walls.show() },
-        { section: "Rice", icon: "󰖟", label: "Wallhaven", hint: "search and download wallpapers",
-          run: [bin + "rice-wallhaven"] },
-        { section: "Rice", icon: "󰝚", label: "Desktop visualiser", keep: true,
-          value: root.visualiser && root.visualiser.enabled ? "On" : "Off",
-          call: () => root.visualiser.toggle() },
-        { section: "Rice", icon: "󰥔", label: "Desktop clock", keep: true,
-          value: root.clock && root.clock.enabled ? "On" : "Off",
-          call: () => root.clock.toggle() },
-        { section: "Rice", icon: "󰎈", label: "Desktop lyrics", keep: true,
-          value: root.lyrics && root.lyrics.enabled ? "On" : "Off",
-          call: () => root.lyrics.toggle() },
-
-        { section: "Bar & shell", icon: "󰍜", label: "Show / hide the bar",
-          run: ["pkill", "-USR1", "-x", "waybar"] },
-        { section: "Bar & shell", icon: "󰑓", label: "Reload the bar", hint: "re-read waybar's config and style",
-          run: ["pkill", "-USR2", "-x", "waybar"] },
-        { section: "Bar & shell", icon: "󰑓", label: "Reload Quickshell", hint: "after editing its QML",
-          call: () => Quickshell.reload(true) },
-
-        { section: "System", icon: "󰙵", label: "Control centre", hint: "Wi-Fi, Bluetooth, theme, night light",
-          call: () => root.controlCenter.show() },
-        { section: "System", icon: "󰕾", label: "Sound", hint: "outputs, inputs, per-app volume",
-          run: ["pavucontrol"] },
-        { section: "System", icon: "󰖩", label: "Wi-Fi",
-          run: [bin + "rice-wifi"] },
-        { section: "System", icon: "󰈀", label: "Network connections", hint: "wired, VPN, advanced",
-          run: ["nm-connection-editor"] },
-        { section: "System", icon: "󰾅", label: "Power profile", keep: true,
-          value: root.pretty(root.powerProfile),
-          call: () => root.cyclePower() },
-        { section: "System", icon: "󰂚", label: "Notifications", hint: "history, do not disturb",
-          call: () => root.notifications.show() },
-        { section: "System", icon: "󰏘", label: "GTK appearance", hint: "theme, icons, cursor, fonts",
-          run: ["nwg-look"] },
-        { section: "System", icon: "󰏘", label: "Qt appearance", hint: "Qt apps such as Kate",
-          run: ["qt6ct"] },
-        { section: "System", icon: "󰄨", label: "Task manager",
-          run: ["kitty", "--class", "taskmgr", "-e", "btop"] },
-        { section: "System", icon: "󰐥", label: "Session", hint: "lock, log out, reboot, power off",
-          run: [bin + "rice-power"] },
-
-        { section: "CachyOS", icon: "󰋼", label: "CachyOS Hello",
-          run: ["cachyos-hello"] },
-        { section: "CachyOS", icon: "󰏗", label: "Package installer",
-          run: ["cachyos-pi"] },
-        { section: "CachyOS", icon: "󰍛", label: "Kernel manager",
-          run: ["cachyos-kernel-manager"] },
-        { section: "CachyOS", icon: "󰘚", label: "CPU scheduler", hint: "sched-ext",
-          run: ["scx-manager"] },
-        { section: "CachyOS", icon: "󰁯", label: "Snapshots", hint: "btrfs / snapper",
-          run: ["btrfs-assistant-launcher"] }
-    ]
+    readonly property var entries: menu ? menu.hubRows("settings") : []
 
     function show() {
         if (open)
             return
         targetScreen = focusedScreen()
         sel = 0
-        powerGet.running = true
         open = true
     }
 
@@ -124,22 +47,7 @@ Scope {
             return
         if (!e.keep)
             close()
-        if (e.run)
-            Quickshell.execDetached(e.run)
-        else if (e.call)
-            e.call()
-    }
-
-    function pretty(profile) {
-        return profile ? profile.split("-").map(w => w[0].toUpperCase() + w.slice(1)).join(" ") : "…"
-    }
-
-    function cyclePower() {
-        const order = ["power-saver", "balanced", "performance"]
-        const next = order[(order.indexOf(powerProfile) + 1) % order.length]
-        powerProfile = next
-        powerSet.command = ["powerprofilesctl", "set", next]
-        powerSet.running = true
+        menu.run(e)
     }
 
     function focusedScreen() {
@@ -149,19 +57,6 @@ Scope {
             if (screens[i].name === name)
                 return screens[i]
         return screens[0]
-    }
-
-    Process {
-        id: powerGet
-        command: ["powerprofilesctl", "get"]
-        stdout: StdioCollector {
-            onStreamFinished: root.powerProfile = text.trim()
-        }
-    }
-
-    Process {
-        id: powerSet
-        onExited: powerGet.running = true     // show what it really is now
     }
 
     LazyLoader {
@@ -273,6 +168,7 @@ Scope {
                                 readonly property bool firstOfSection: index === 0
                                     || root.entries[index - 1].section !== modelData.section
                                 readonly property bool selected: index === root.sel
+                                readonly property var value: root.menu.valueOf(modelData)
 
                                 Layout.fillWidth: true
                                 spacing: 2
@@ -314,13 +210,10 @@ Scope {
                                         anchors.rightMargin: 10
                                         spacing: 12
 
-                                        Text {
+                                        MenuIcon {
                                             Layout.preferredWidth: 22
-                                            horizontalAlignment: Text.AlignHCenter
-                                            text: entry.modelData.icon
-                                            color: Theme.primary
-                                            font.family: Theme.mono
-                                            font.pixelSize: 18
+                                            icon: entry.modelData.icon || ""
+                                            size: 18
                                         }
 
                                         Text {
@@ -340,19 +233,19 @@ Scope {
                                         }
 
                                         Rectangle {
-                                            visible: entry.modelData.value !== undefined
+                                            visible: entry.value !== undefined
                                             implicitWidth: valueText.implicitWidth + 18
                                             implicitHeight: 24
                                             radius: 12
-                                            color: entry.modelData.value === "Off"
+                                            color: entry.value === "Off"
                                                 ? Theme.surface_container_highest
                                                 : Theme.alpha(Theme.primary, 0.22)
 
                                             Text {
                                                 id: valueText
                                                 anchors.centerIn: parent
-                                                text: entry.modelData.value || ""
-                                                color: entry.modelData.value === "Off" ? Theme.on_surface_variant : Theme.primary
+                                                text: entry.value || ""
+                                                color: entry.value === "Off" ? Theme.on_surface_variant : Theme.primary
                                                 font.family: Theme.font
                                                 font.pixelSize: 12
                                                 font.weight: Font.DemiBold
